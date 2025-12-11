@@ -23,9 +23,6 @@ class ProcessingWorker(QThread):
     finished_success = Signal(str)       # 成功信号 (输出目录)
     finished_error = Signal(str)         # 失败信号 (错误信息)
     
-    # 增加一个信号用于请求确认，主线程处理完后通过 set_confirmation_result 返回
-    # 但为了简化逻辑，我们建议在 Start 前由主线程完成所有交互确认
-
     def __init__(self, dirs, use_cache_override=None):
         super().__init__()
         self.dirs = dirs # [rgb_dir, input_dir, output_dir]
@@ -212,6 +209,32 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
+    def get_standard_config_path(self):
+        """获取跨平台的标准化配置文件路径"""
+        app_name = "DecoupleTool"
+        
+        if sys.platform == 'win32':
+            # Windows: %APPDATA%/DecoupleTool
+            base_dir = os.environ.get('APPDATA') or os.path.expanduser('~\\AppData\\Roaming')
+        elif sys.platform == 'darwin':
+            # macOS: ~/Library/Application Support/DecoupleTool
+            base_dir = os.path.expanduser('~/Library/Application Support')
+        else:
+            # Linux: ~/.config/DecoupleTool
+            base_dir = os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config')
+        
+        # 拼接应用文件夹
+        config_dir = os.path.join(base_dir, app_name)
+        
+        # 如果文件夹不存在，自动创建
+        if not os.path.exists(config_dir):
+            try:
+                os.makedirs(config_dir)
+            except:
+                return os.path.join(os.path.expanduser("~"), ".decouple_tool_config.json")
+        
+        return os.path.join(config_dir, "config.json")
+
     def setup_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -331,31 +354,13 @@ class MainWindow(QMainWindow):
         if path: self.edit_output.setText(path)
 
     # --- 配置读写 (使用系统标准路径) ---
-    def get_config_path(self):
-        # 跨平台标准路径
-        app_name = "DecoupleTool"
-        if sys.platform == 'win32':
-            base = os.environ.get('APPDATA') or os.path.expanduser('~\\AppData\\Roaming')
-        elif sys.platform == 'darwin':
-            base = os.path.expanduser('~/Library/Application Support')
-        else:
-            base = os.path.expanduser('~/.config')
-        
-        config_dir = os.path.join(base, app_name)
-        if not os.path.exists(config_dir):
-            try:
-                os.makedirs(config_dir)
-            except:
-                return os.path.join(os.path.expanduser("~"), ".decouple_tool_config.json")
-        return os.path.join(config_dir, "config.json")
-
     def load_settings(self):
         defaults = {
             "rgb": os.path.join(os.getcwd(), "RGB"),
             "input": os.path.join(os.getcwd(), "input"),
             "output": os.path.join(os.getcwd(), "output")
         }
-        cfg_path = self.get_config_path()
+        cfg_path = self.get_standard_config_path()
         if os.path.exists(cfg_path):
             try:
                 with open(cfg_path, 'r', encoding='utf-8') as f:
@@ -373,7 +378,7 @@ class MainWindow(QMainWindow):
             "input": self.edit_input.text(),
             "output": self.edit_output.text()
         }
-        cfg_path = self.get_config_path()
+        cfg_path = self.get_standard_config_path()
         try:
             with open(cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
@@ -383,11 +388,11 @@ class MainWindow(QMainWindow):
     # --- 核心控制 ---
     def toggle_process(self):
         if not self.is_running:
-            self.start_processing()
+            self.start_process()
         else:
-            self.stop_processing()
+            self.stop_process()
 
-    def start_processing(self):
+    def start_process(self):
         # 1. 保存配置
         self.save_settings()
         
@@ -425,16 +430,19 @@ class MainWindow(QMainWindow):
         self.worker.finished_success.connect(self.on_worker_success)
         self.worker.finished_error.connect(self.on_worker_error)
         
+        # 【关键修复】监听 finished 信号以处理“中途取消”的情况
+        # QThread 无论是 run 结束、报错还是 return，都会发射 finished
+        self.worker.finished.connect(self.on_worker_finished_cleanup)
+        
         self.set_ui_running(True)
         self.worker.start()
 
-    def stop_processing(self):
+    def stop_process(self):
         if self.worker and self.worker.isRunning():
             self.status_label.setText("正在停止...")
-            self.btn_action.setEnabled(False) # 防止重复点击
+            self.btn_action.setEnabled(False) # 暂时禁用防止连点
             self.worker.cancel()
-            # 线程由于是 loop 检查 _is_cancelled，需要一点时间退出
-            # 退出后会触发 finished 信号，我们在那里恢复 UI
+            # 线程会在检查到 cancel 标志后 return，触发 finished 信号
 
     def set_ui_running(self, running):
         self.is_running = running
@@ -456,9 +464,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_worker_success(self, output_dir):
-        self.set_ui_running(False)
+        # 成功时才弹窗和打开文件夹
         QMessageBox.information(self, "完成", "处理完毕")
-        # 打开文件夹
         if sys.platform == 'win32':
             os.startfile(output_dir)
         elif sys.platform == 'darwin':
@@ -468,12 +475,16 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_worker_error(self, err_msg):
-        self.set_ui_running(False)
-        # 如果不是用户手动取消，弹窗报错
-        if "用户取消" not in err_msg and self.status_label.text() != "正在停止...":
-             QMessageBox.critical(self, "错误", f"发生错误:\n{err_msg}")
-        else:
-            self.status_label.setText("已取消")
+        # 报错弹窗
+        QMessageBox.critical(self, "错误", f"发生错误:\n{err_msg}")
+
+    @Slot()
+    def on_worker_finished_cleanup(self):
+        """线程结束后的通用清理（包括取消情况）"""
+        # 【关键修复】这里修正了函数名，改为 set_ui_running
+        if self.is_running:
+            self.set_ui_running(False)
+            self.status_label.setText("操作已取消")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
