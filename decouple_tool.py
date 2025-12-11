@@ -53,6 +53,14 @@ class DecoupleApp:
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         main_frame.columnconfigure(1, weight=1)
+        
+        # 【关键修改 1】配置全局样式
+        style = ttk.Style()
+        # 定义一个 "大号按钮" 样式，增加内部填充(padding)
+        # padding=(左右, 上下)，这会让按钮实体变大，点击热区自然变大
+        style.configure("Large.TButton", font=("Helvetica", 13), padding=(20, 10))
+        # 定义浏览按钮的样式
+        style.configure("Normal.TButton", padding=(10, 5))
 
         self.create_path_selector(main_frame, "RGB 校正文件夹:", self.dir_rgb, 0)
         self.create_path_selector(main_frame, "Input 待处理文件夹:", self.dir_input, 1)
@@ -69,20 +77,27 @@ class DecoupleApp:
         btn_frame = ttk.Frame(main_frame)
         btn_frame.grid(row=5, column=0, columnspan=3, pady=20)
         
-        # 主操作按钮
-        self.btn_action = ttk.Button(btn_frame, text="开始处理")
-        self.btn_action.pack(ipadx=20, ipady=5)
-        
-        # 【关键修改】使用 <Button-1> (按下即触发)
-        self.btn_action.bind("<Button-1>", lambda e: self.toggle_process())
+        # 【关键修改 2】使用标准 ttk.Button + command + 自定义样式
+        # 放弃 bind，回归最标准的 command，解决拖拽Bug
+        self.btn_action = ttk.Button(
+            btn_frame, 
+            text="开始处理", 
+            style="Large.TButton", # 使用大号样式
+            command=self.toggle_process
+        )
+        self.btn_action.pack()
 
     def create_path_selector(self, parent, label_text, var, row):
         ttk.Label(parent, text=label_text, width=18).grid(row=row, column=0, sticky="w", pady=8)
         ttk.Entry(parent, textvariable=var, width=45).grid(row=row, column=1, sticky="ew", padx=5, pady=8)
         
-        # 浏览按钮也改为按下即触发
-        btn = ttk.Button(parent, text="浏览...")
-        btn.bind("<Button-1>", lambda e: self.browse_dir(var))
+        # 浏览按钮也使用标准 command 和样式
+        btn = ttk.Button(
+            parent, 
+            text="浏览...", 
+            style="Normal.TButton",
+            command=lambda: self.browse_dir(var)
+        )
         btn.grid(row=row, column=2, sticky="e", pady=8, padx=(5,0))
 
     def browse_dir(self, var):
@@ -93,10 +108,7 @@ class DecoupleApp:
     # ================= 按钮状态逻辑 =================
     
     def toggle_process(self):
-        # 检查按钮是否被禁用 (虽然 bind 会绕过 state 检查，所以我们需要手动检查)
-        if str(self.btn_action['state']) == 'disabled':
-            return
-
+        # 使用 command 绑定后，禁用的按钮自动不可点，不需要手动检查 state
         if not self.is_running:
             self.start_process_logic()
         else:
@@ -175,7 +187,7 @@ class DecoupleApp:
         try:
             self.set_ui_state_running()
             self.root.config(cursor="watch")
-            # 【修改点】删除了关于无响应的提示文字
+            # 【修改点】移除了"界面可能会短暂无响应"提示
             self.status_label.config(text="步骤 1/4: 准备校正矩阵...")
             self.root.update()
             
@@ -202,6 +214,7 @@ class DecoupleApp:
         matrix_path = os.path.join(dir_rgb, "calibration_matrix.npy")
         M_Final = None
         
+        # 检查缓存
         if os.path.exists(matrix_path):
             mod_time = time.ctime(os.path.getmtime(matrix_path))
             use_cache = messagebox.askyesno(
@@ -306,6 +319,7 @@ class DecoupleApp:
         if not msg: msg = "警告"
         messagebox.showwarning(title, msg)
 
+    # --- 算法部分 ---
     def get_roi_average(self, path, black_lvl):
         img = tifffile.imread(path)
         arr = img.astype(np.float64)
