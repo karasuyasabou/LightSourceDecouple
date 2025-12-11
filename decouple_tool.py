@@ -42,7 +42,7 @@ class ProcessingWorker(QThread):
             matrix_path = os.path.join(dir_rgb, "calibration_matrix.npy")
             M_Final = None
 
-            # 1.1 检查缓存策略 (由主线程传入)
+            # 1.1 检查缓存策略
             if self.use_cache_override is True and os.path.exists(matrix_path):
                 try:
                     M_Final = np.load(matrix_path)
@@ -190,17 +190,11 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.is_running = False
         
-        # 设置应用图标
         self._setup_icon()
-        
-        # 初始化 UI
         self.setup_ui()
-        
-        # 加载上次配置
         self.load_settings()
 
     def _setup_icon(self):
-        # 尝试加载 icon.png
         if hasattr(sys, '_MEIPASS'):
             base_path = sys._MEIPASS
         else:
@@ -210,29 +204,20 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
     def get_standard_config_path(self):
-        """获取跨平台的标准化配置文件路径"""
         app_name = "DecoupleTool"
-        
         if sys.platform == 'win32':
-            # Windows: %APPDATA%/DecoupleTool
-            base_dir = os.environ.get('APPDATA') or os.path.expanduser('~\\AppData\\Roaming')
+            base = os.environ.get('APPDATA') or os.path.expanduser('~\\AppData\\Roaming')
         elif sys.platform == 'darwin':
-            # macOS: ~/Library/Application Support/DecoupleTool
-            base_dir = os.path.expanduser('~/Library/Application Support')
+            base = os.path.expanduser('~/Library/Application Support')
         else:
-            # Linux: ~/.config/DecoupleTool
-            base_dir = os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config')
+            base = os.path.expanduser('~/.config')
         
-        # 拼接应用文件夹
-        config_dir = os.path.join(base_dir, app_name)
-        
-        # 如果文件夹不存在，自动创建
+        config_dir = os.path.join(base, app_name)
         if not os.path.exists(config_dir):
             try:
                 os.makedirs(config_dir)
             except:
                 return os.path.join(os.path.expanduser("~"), ".decouple_tool_config.json")
-        
         return os.path.join(config_dir, "config.json")
 
     def setup_ui(self):
@@ -286,61 +271,42 @@ class MainWindow(QMainWindow):
 
         # 4. 底部按钮区
         btn_layout = QHBoxLayout()
-        btn_layout.addStretch() # 左侧弹簧
+        btn_layout.addStretch()
         
-        # 主按钮
         self.btn_action = QPushButton("开始处理")
         self.btn_action.setFixedSize(140, 40)
-        # 初始样式：蓝色主按钮
         self.update_button_style(is_running=False)
         self.btn_action.clicked.connect(self.toggle_process)
         
         btn_layout.addWidget(self.btn_action)
-        btn_layout.addStretch() # 右侧弹簧
+        btn_layout.addStretch()
         
         main_layout.addLayout(btn_layout)
 
     def update_button_style(self, is_running):
         if is_running:
             self.btn_action.setText("停止")
-            # 运行时：灰色样式
             self.btn_action.setStyleSheet("""
                 QPushButton {
-                    font-size: 14px;
-                    font-weight: bold;
-                    background-color: #E0E0E0;
-                    color: black;
-                    border: 1px solid #C0C0C0;
-                    border-radius: 6px;
+                    font-size: 14px; font-weight: bold;
+                    background-color: #E0E0E0; color: black;
+                    border: 1px solid #C0C0C0; border-radius: 6px;
                 }
-                QPushButton:hover {
-                    background-color: #D0D0D0;
-                }
+                QPushButton:hover { background-color: #D0D0D0; }
             """)
         else:
             self.btn_action.setText("开始处理")
-            # 默认：蓝色主按钮样式
             self.btn_action.setStyleSheet("""
                 QPushButton {
-                    font-size: 14px;
-                    font-weight: bold;
-                    background-color: #007AFF;
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
+                    font-size: 14px; font-weight: bold;
+                    background-color: #007AFF; color: white;
+                    border: none; border-radius: 6px;
                 }
-                QPushButton:hover {
-                    background-color: #0069D9;
-                }
-                QPushButton:pressed {
-                    background-color: #0051A8;
-                }
-                QPushButton:disabled {
-                    background-color: #CCCCCC;
-                }
+                QPushButton:hover { background-color: #0069D9; }
+                QPushButton:pressed { background-color: #0051A8; }
+                QPushButton:disabled { background-color: #CCCCCC; }
             """)
 
-    # --- 浏览逻辑 ---
     def browse_rgb(self):
         path = QFileDialog.getExistingDirectory(self, "选择 RGB 校正文件夹", self.edit_rgb.text())
         if path: self.edit_rgb.setText(path)
@@ -353,7 +319,7 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "选择 Output 文件夹", self.edit_output.text())
         if path: self.edit_output.setText(path)
 
-    # --- 配置读写 (使用系统标准路径) ---
+    # --- 配置读写 ---
     def load_settings(self):
         defaults = {
             "rgb": os.path.join(os.getcwd(), "RGB"),
@@ -367,7 +333,6 @@ class MainWindow(QMainWindow):
                     data = json.load(f)
                     defaults.update(data)
             except: pass
-        
         self.edit_rgb.setText(defaults["rgb"])
         self.edit_input.setText(defaults["input"])
         self.edit_output.setText(defaults["output"])
@@ -393,28 +358,25 @@ class MainWindow(QMainWindow):
             self.stop_process()
 
     def start_process(self):
-        # 1. 保存配置
+        self.dir_rgb = self.edit_rgb.text()
+        self.dir_input = self.edit_input.text()
+        self.dir_output = self.edit_output.text()
         self.save_settings()
-        
-        # 2. 验证路径
-        d_rgb = self.edit_rgb.text()
-        d_in = self.edit_input.text()
-        d_out = self.edit_output.text()
-        
-        if not all([d_rgb, d_in, d_out]):
+
+        if not all([self.dir_rgb, self.dir_input, self.dir_output]):
             QMessageBox.critical(self, "错误", "路径不能为空")
             return
         
-        if not os.path.exists(d_out):
+        if not os.path.exists(self.dir_output):
             try:
-                os.makedirs(d_out)
+                os.makedirs(self.dir_output)
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"无法创建输出目录:\n{e}")
                 return
 
-        # 3. 检查缓存 (主线程交互)
+        # 主线程检查缓存
+        matrix_path = os.path.join(self.dir_rgb, "calibration_matrix.npy")
         use_cache = None
-        matrix_path = os.path.join(d_rgb, "calibration_matrix.npy")
         if os.path.exists(matrix_path):
             mod_time = time.ctime(os.path.getmtime(matrix_path))
             reply = QMessageBox.question(
@@ -424,14 +386,12 @@ class MainWindow(QMainWindow):
             )
             use_cache = (reply == QMessageBox.StandardButton.Yes)
 
-        # 4. 启动线程
-        self.worker = ProcessingWorker([d_rgb, d_in, d_out], use_cache_override=use_cache)
+        self.worker = ProcessingWorker([self.dir_rgb, self.dir_input, self.dir_output], use_cache_override=use_cache)
         self.worker.progress_updated.connect(self.on_worker_progress)
         self.worker.finished_success.connect(self.on_worker_success)
         self.worker.finished_error.connect(self.on_worker_error)
         
-        # 【关键修复】监听 finished 信号以处理“中途取消”的情况
-        # QThread 无论是 run 结束、报错还是 return，都会发射 finished
+        # 监听 finished 信号以处理“中途取消”的情况
         self.worker.finished.connect(self.on_worker_finished_cleanup)
         
         self.set_ui_running(True)
@@ -442,7 +402,6 @@ class MainWindow(QMainWindow):
             self.status_label.setText("正在停止...")
             self.btn_action.setEnabled(False) # 暂时禁用防止连点
             self.worker.cancel()
-            # 线程会在检查到 cancel 标志后 return，触发 finished 信号
 
     def set_ui_running(self, running):
         self.is_running = running
@@ -464,7 +423,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_worker_success(self, output_dir):
-        # 成功时才弹窗和打开文件夹
+        # 【关键修改】成功时，显式标记任务结束
+        self.set_ui_running(False)
         QMessageBox.information(self, "完成", "处理完毕")
         if sys.platform == 'win32':
             os.startfile(output_dir)
@@ -475,13 +435,14 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_worker_error(self, err_msg):
-        # 报错弹窗
+        # 【关键修改】报错时，显式标记任务结束
+        self.set_ui_running(False)
         QMessageBox.critical(self, "错误", f"发生错误:\n{err_msg}")
 
     @Slot()
     def on_worker_finished_cleanup(self):
-        """线程结束后的通用清理（包括取消情况）"""
-        # 【关键修复】这里修正了函数名，改为 set_ui_running
+        """线程结束后的通用清理"""
+        # 如果 is_running 依然为 True，说明没有经过 success/error，而是被 cancel 或者其他原因退出
         if self.is_running:
             self.set_ui_running(False)
             self.status_label.setText("操作已取消")
