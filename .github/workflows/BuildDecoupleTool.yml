@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }} (${{ matrix.arch }})
+    name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -16,30 +16,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon (M1/M2/M3) - Native build on macOS 15
-          - os: macos-15
+          - os: macos-14
             platform: macos
             arch: arm64
-            python_arch: arm64
+            extension: ''
             icon_file: icons/app.icns
             sep: ':'
             artifact_name: DecoupleTool-macOS-arm64.zip
           
-          # Intel Mac (x64) - Build on macOS 14 via Rosetta (x64 Python)
-          # 使用 arch -x86_64 强制下载 Intel 版本的依赖库
-          - os: macos-14
+          # 参考代码使用的 Runner
+          - os: macos-15-intel
             platform: macos
             arch: x64
-            python_arch: x64
+            extension: ''
             icon_file: icons/app.icns
             sep: ':'
             artifact_name: DecoupleTool-macOS-x64.zip
 
-          # Windows
           - os: windows-latest
             platform: windows
             arch: x64
-            python_arch: x64
+            extension: .exe
             icon_file: icons/app.ico
             sep: ';'
             artifact_name: DecoupleTool-Windows-x64.zip
@@ -52,25 +49,12 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        architecture: ${{ matrix.python_arch }}
 
     - name: Install dependencies
       run: |
-        # 【修复点1】定义 Rosetta 前缀
-        # 如果是 macOS 且目标是 x64，强制使用 arch -x86_64 运行后续命令
-        PREFIX=""
-        if [[ "${{ matrix.platform }}" == "macos" && "${{ matrix.arch }}" == "x64" ]]; then
-          PREFIX="arch -x86_64"
-        fi
-        
-        # 打印当前架构以验证 (arm64 机器上应显示 x86_64)
-        echo "Build architecture context:"
-        $PREFIX uname -m
-        
-        # 使用带前缀的命令安装依赖
-        # 这确保 pip 下载的是 Intel (x86_64) 的 whl 包，而不是 arm64 包
-        $PREFIX python -m pip install --upgrade pip setuptools wheel
-        $PREFIX pip install PySide6 numpy tifffile imagecodecs Pillow pyinstaller pyinstaller-hooks-contrib
+        python -m pip install --upgrade pip setuptools wheel
+        # 添加 PySide6 及其他核心依赖
+        pip install PySide6 numpy tifffile imagecodecs Pillow pyinstaller pyinstaller-hooks-contrib
 
     - name: Prepare app icon (macOS)
       if: matrix.platform == 'macos'
@@ -102,28 +86,10 @@ jobs:
         ICON_ARG=""
         if [ -f "${{ matrix.icon_file }}" ]; then ICON_ARG="--icon=${{ matrix.icon_file }}"; fi
         
-        # 【修复点2】同样为打包步骤应用 Rosetta 前缀
-        PREFIX=""
-        if [[ "${{ matrix.platform }}" == "macos" && "${{ matrix.arch }}" == "x64" ]]; then
-          PREFIX="arch -x86_64"
-        fi
-
-        # 显式指定目标架构参数 (PyInstaller 内部也需要)
-        PYI_ARCH_ARG=""
-        if [ "${{ matrix.platform }}" = "macos" ]; then
-           if [ "${{ matrix.arch }}" = "x64" ]; then
-             PYI_ARCH_ARG="--target-arch x86_64"
-           elif [ "${{ matrix.arch }}" = "arm64" ]; then
-             PYI_ARCH_ARG="--target-arch arm64"
-           fi
-        fi
-
-        # 运行打包
-        # 注意前面加上了 $PREFIX，确保 PyInstaller 在正确的架构模式下运行
-        $PREFIX python -m PyInstaller --clean --noconfirm --windowed --noconsole --onedir \
+        # PySide6 需要 --onedir 模式以获得最佳启动速度
+        python -m PyInstaller --clean --noconfirm --windowed --noconsole --onedir \
           --name "DecoupleTool" \
           $ICON_ARG \
-          $PYI_ARCH_ARG \
           --add-data "icon.png${{ matrix.sep }}." \
           --collect-all imagecodecs \
           --collect-all tifffile \
