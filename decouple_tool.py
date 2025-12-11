@@ -1,6 +1,7 @@
 import os
 import time
 import sys
+import json  # 【新增】用于读写配置文件
 import numpy as np
 import tifffile
 import tkinter as tk
@@ -8,14 +9,21 @@ from tkinter import filedialog, messagebox, ttk
 import threading
 
 class DecoupleApp:
+    CONFIG_FILE = "config.json"
+
     def __init__(self, root):
         self.root = root
         self.root.title("光源-CMOS去串扰工具 (稳定版)")
         self.center_window(800, 350)
         self.root.resizable(False, False)
         
-        # 加载图标
-        icon_path = os.path.join(os.getcwd(), "icon.png")
+        # --- 图标加载逻辑 ---
+        if hasattr(sys, '_MEIPASS'):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.abspath(".")
+            
+        icon_path = os.path.join(base_path, "icon.png")
         if os.path.exists(icon_path):
             try:
                 icon_img = tk.PhotoImage(file=icon_path)
@@ -23,11 +31,13 @@ class DecoupleApp:
             except Exception:
                 pass
         
-        # 路径变量
-        cwd = os.getcwd()
-        self.dir_rgb = tk.StringVar(value=os.path.join(cwd, "RGB"))
-        self.dir_input = tk.StringVar(value=os.path.join(cwd, "input"))
-        self.dir_output = tk.StringVar(value=os.path.join(cwd, "output"))
+        # --- 初始化路径变量 ---
+        self.dir_rgb = tk.StringVar()
+        self.dir_input = tk.StringVar()
+        self.dir_output = tk.StringVar()
+        
+        # 【修改点 1】加载上次的配置，如果没有则使用默认
+        self.load_settings()
 
         self.setup_ui()
 
@@ -42,7 +52,6 @@ class DecoupleApp:
         main_frame = ttk.Frame(self.root, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 【修改点 1】配置列权重，让中间列(输入框)自动拉伸，防止挤压右侧按钮
         main_frame.columnconfigure(1, weight=1)
 
         self.create_path_selector(main_frame, "RGB 校正文件夹:", self.dir_rgb, 0)
@@ -62,23 +71,42 @@ class DecoupleApp:
         style = ttk.Style()
         style.configure("Big.TButton", font=("Helvetica", 10, "bold"))
         
-        self.btn_start = ttk.Button(btn_frame, text="开始处理", style="Big.TButton", command=self.start_process_logic)
-        self.btn_start.pack(side=tk.LEFT, padx=10, ipadx=10, ipady=5)
+        # 【修改点 2】增大主按钮的点击区域 (ipadx/ipady) 并添加手型光标
+        self.btn_start = ttk.Button(
+            btn_frame, 
+            text="开始处理", 
+            style="Big.TButton", 
+            command=self.start_process_logic,
+            cursor="hand2" # 鼠标悬停变手型
+        )
+        # ipadx/ipady 是内部填充，直接撑大按钮的可点击面积
+        self.btn_start.pack(side=tk.LEFT, padx=10, ipadx=20, ipady=10)
         
-        self.btn_cancel = ttk.Button(btn_frame, text="取消", command=self.cancel_process, state=tk.DISABLED)
-        self.btn_cancel.pack(side=tk.LEFT, padx=10, ipadx=5, ipady=5)
+        self.btn_cancel = ttk.Button(
+            btn_frame, 
+            text="取消", 
+            command=self.cancel_process, 
+            state=tk.DISABLED,
+            cursor="hand2"
+        )
+        self.btn_cancel.pack(side=tk.LEFT, padx=10, ipadx=10, ipady=10)
 
         self.is_cancelled = False
 
     def create_path_selector(self, parent, label_text, var, row):
-        # 【修改点 2】Label 固定宽度
         ttk.Label(parent, text=label_text, width=18).grid(row=row, column=0, sticky="w", pady=8)
         
-        # 【修改点 3】Entry 宽度改小(作为最小宽度)，并设置 sticky="ew" 让其自动填满剩余空间
         ttk.Entry(parent, textvariable=var, width=45).grid(row=row, column=1, sticky="ew", padx=5, pady=8)
         
-        # 【修改点 4】Button 放在最右侧，不再会被挤出屏幕
-        ttk.Button(parent, text="浏览...", command=lambda: self.browse_dir(var)).grid(row=row, column=2, sticky="e", pady=8)
+        # 【修改点 3】增大“浏览”按钮的点击区域
+        btn = ttk.Button(
+            parent, 
+            text="浏览...", 
+            command=lambda: self.browse_dir(var),
+            cursor="hand2" # 鼠标悬停变手型
+        )
+        # ipady=5 让按钮变高，更容易点中
+        btn.grid(row=row, column=2, sticky="e", pady=8, ipady=5)
 
     def browse_dir(self, var):
         initial = var.get() if os.path.exists(var.get()) else os.getcwd()
@@ -89,9 +117,51 @@ class DecoupleApp:
         self.is_cancelled = True
         self.status_label.config(text="正在取消...")
 
+    # ================= 配置读写逻辑 (新增) =================
+    
+    def load_settings(self):
+        """加载配置文件，如果不存在则使用默认值"""
+        cwd = os.getcwd()
+        defaults = {
+            "rgb": os.path.join(cwd, "RGB"),
+            "input": os.path.join(cwd, "input"),
+            "output": os.path.join(cwd, "output")
+        }
+        
+        # 尝试读取 config.json
+        config_path = os.path.join(cwd, self.CONFIG_FILE)
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding='utf-8') as f:
+                    data = json.load(f)
+                    # 更新默认值
+                    defaults.update(data)
+            except Exception:
+                pass # 如果读取失败，就用默认值
+        
+        self.dir_rgb.set(defaults["rgb"])
+        self.dir_input.set(defaults["input"])
+        self.dir_output.set(defaults["output"])
+
+    def save_settings(self):
+        """保存当前路径到配置文件"""
+        data = {
+            "rgb": self.dir_rgb.get(),
+            "input": self.dir_input.get(),
+            "output": self.dir_output.get()
+        }
+        try:
+            with open(self.CONFIG_FILE, "w", encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"保存配置失败: {e}")
+
     # ================= 核心逻辑 =================
     
     def start_process_logic(self):
+        # 【修改点 4】开始处理时，自动保存当前路径配置
+        self.save_settings()
+
         self.btn_start.config(state=tk.DISABLED)
         self.btn_cancel.config(state=tk.NORMAL)
         self.is_cancelled = False
