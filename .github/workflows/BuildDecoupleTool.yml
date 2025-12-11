@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon (M1/M2/M3)
+          # Apple Silicon (M1/M2/M3) - Native build on macOS 15
           - os: macos-15
             platform: macos
             arch: arm64
@@ -25,8 +25,9 @@ jobs:
             sep: ':'
             artifact_name: DecoupleTool-macOS-arm64.zip
           
-          # Intel Mac (x64)
-          - os: macos-15
+          # Intel Mac (x64) - Use macos-13 (Native Intel) to avoid Rosetta issues
+          # While macos-13 is deprecated, it is the only reliable way to get native x64 environment currently.
+          - os: macos-13
             platform: macos
             arch: x64
             python_arch: x64
@@ -70,9 +71,9 @@ jobs:
         sips -z 128 128   "icon.png" --out icons/icon.iconset/icon_128x128.png
         sips -z 256 256   "icon.png" --out icons/icon.iconset/icon_128x128@2x.png
         sips -z 256 256   "icon.png" --out icons/icon.iconset/icon_256x256.png
-        sips -z 512 512   "icon.png" --out icons/icon.iconset/icon_256x256@2x.png
-        sips -z 512 512   "icon.png" --out icons/icon.iconset/icon_512x512.png
-        sips -z 1024 1024 "icon.png" --out icons/icon.iconset/icon_512x512@2x.png
+        sips -z 512 512   "icon.png" --out icons.iconset/icon_256x256@2x.png
+        sips -z 512 512   "icon.png" --out icons.iconset/icon_512x512.png
+        sips -z 1024 1024 "icon.png" --out icons.iconset/icon_512x512@2x.png
         iconutil -c icns -o icons/app.icns icons/icon.iconset
         echo "✅ Generated icons/app.icns"
 
@@ -97,8 +98,7 @@ jobs:
            fi
         fi
 
-        # 【核心修改 1】改用 --onedir 模式以解决启动慢的问题
-        # --onedir 是默认模式，显式指定以防万一
+        # Using --onedir for faster startup, and --windowed for GUI mode
         python -m PyInstaller --clean --noconfirm --windowed --noconsole --onedir \
           --name "DecoupleTool" \
           $ICON_ARG \
@@ -112,7 +112,6 @@ jobs:
       if: matrix.platform == 'macos'
       run: |
         cd dist
-        # --onedir 模式下，dist/DecoupleTool.app 依然是一个完整的 Bundle
         chmod +x DecoupleTool.app/Contents/MacOS/DecoupleTool
         ditto -c -k --sequesterRsrc --keepParent DecoupleTool.app ${{ matrix.artifact_name }}
 
@@ -120,8 +119,6 @@ jobs:
       if: matrix.platform == 'windows'
       run: |
         cd dist
-        # 【核心修改 2】Windows 下 --onedir 生成的是一个文件夹
-        # 我们需要压缩整个 DecoupleTool 文件夹，而不是单个 exe
         powershell Compress-Archive -Path DecoupleTool -DestinationPath ${{ matrix.artifact_name }}
 
     - name: Upload Artifact
