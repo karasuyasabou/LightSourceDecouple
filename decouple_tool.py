@@ -1,0 +1,40 @@
+name: Build Mac App
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: # 允许手动点击按钮触发
+
+jobs:
+  build:
+    runs-on: macos-latest  # 关键：指定运行在 macOS 上
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9' # 建议使用 3.9 或 3.10，兼容性好
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install numpy pillow pyinstaller
+
+    - name: Build with PyInstaller
+      run: |
+        # 使用 --windowed 生成 .app 包
+        pyinstaller --noconsole --windowed --name="DecoupleTool" decouple_tool.py
+
+    - name: Compress App
+      run: |
+        # GitHub Artifacts 上传文件夹比较慢，建议先压缩成 zip
+        cd dist
+        zip -r DecoupleTool_Mac.zip DecoupleTool.app
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Mac-App-Build
+        path: dist/DecoupleTool_Mac.zip
