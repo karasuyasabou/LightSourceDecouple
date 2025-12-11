@@ -1,40 +1,33 @@
-name: Build Mac App
+46 INFO: PyInstaller: 6.17.0, contrib hooks: 2025.10
+46 INFO: Python: 3.9.13
+60 INFO: Platform: macOS-15.7.2-arm64-arm-64bit
+60 INFO: Python environment: /Library/Frameworks/Python.framework/Versions/3.9
+61 INFO: wrote /Users/runner/work/LightSourceDecouple/LightSourceDecouple/DecoupleTool.spec
+63 INFO: Module search paths (PYTHONPATH):
+['/Library/Frameworks/Python.framework/Versions/3.9/lib/python39.zip',
+ '/Library/Frameworks/Python.framework/Versions/3.9/lib/python3.9',
+ '/Library/Frameworks/Python.framework/Versions/3.9/lib/python3.9/lib-dynload',
+ '/Library/Frameworks/Python.framework/Versions/3.9/lib/python3.9/site-packages',
+ '/Users/runner/work/LightSourceDecouple/LightSourceDecouple']
+241 INFO: checking Analysis
+241 INFO: Building Analysis because Analysis-00.toc is non existent
+241 INFO: Looking for Python shared library...
+245 INFO: Using Python shared library: /Library/Frameworks/Python.framework/Versions/3.9/Python
+245 INFO: Running Analysis Analysis-00.toc
+245 INFO: Target bytecode optimization level: 0
+245 INFO: Initializing module dependency graph...
+245 INFO: Initializing module graph hook caches...
+252 INFO: Analyzing modules for base_library.zip ...
+630 INFO: Processing standard module hook 'hook-encodings.py' from '/Library/Frameworks/Python.framework/Versions/3.9/lib/python3.9/site-packages/PyInstaller/hooks'
+899 INFO: Processing standard module hook 'hook-heapq.py' from '/Library/Frameworks/Python.framework/Versions/3.9/lib/python3.9/site-packages/PyInstaller/hooks'
+1439 INFO: Processing standard module hook 'hook-pickle.py' from '/Library/Frameworks/Python.framework/Versions/3.9/lib/python3.9/site-packages/PyInstaller/hooks'
+2136 INFO: Caching module dependency graph...
+2160 INFO: Analyzing /Users/runner/work/LightSourceDecouple/LightSourceDecouple/decouple_tool.py
 
-on:
-  push:
-    branches: [ "main" ]
-  workflow_dispatch: # 允许手动点击按钮触发
+Syntax error in /Users/runner/work/LightSourceDecouple/LightSourceDecouple/decouple_tool.py
+  File "/Users/runner/work/LightSourceDecouple/LightSourceDecouple/decouple_tool.py", line 1
+     name: Build Mac App
+                 ^
+ SyntaxError: invalid syntax
 
-jobs:
-  build:
-    runs-on: macos-latest  # 关键：指定运行在 macOS 上
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9' # 建议使用 3.9 或 3.10，兼容性好
-
-    - name: Install Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install numpy pillow pyinstaller
-
-    - name: Build with PyInstaller
-      run: |
-        # 使用 --windowed 生成 .app 包
-        pyinstaller --noconsole --windowed --name="DecoupleTool" decouple_tool.py
-
-    - name: Compress App
-      run: |
-        # GitHub Artifacts 上传文件夹比较慢，建议先压缩成 zip
-        cd dist
-        zip -r DecoupleTool_Mac.zip DecoupleTool.app
-
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: Mac-App-Build
-        path: dist/DecoupleTool_Mac.zip
+Error: Process completed with exit code 1.
