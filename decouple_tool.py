@@ -8,6 +8,57 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import threading
 
+# =========================================================================
+# 自定义稳健按钮类 (RobustButton)
+# 彻底解决 macOS 原生按钮点击不灵敏/需要拖动的 Bug
+# =========================================================================
+class RobustButton(tk.Label):
+    def __init__(self, parent, text, command, **kwargs):
+        # 默认样式：模拟原生按钮的浅灰色背景、微凸起边框
+        default_bg = "#ECECEC" if sys.platform == "darwin" else "#F0F0F0"
+        
+        super().__init__(
+            parent, 
+            text=text, 
+            command=None, # Label 没有 command，我们自己处理
+            bg=default_bg,
+            fg="black",
+            relief="raised", # 凸起效果
+            bd=1,            # 边框宽度
+            font=("Helvetica", 13),
+            padx=15, pady=5, # 内部填充，增大点击面积
+            cursor="arrow",
+            **kwargs
+        )
+        self.user_command = command
+        
+        # 绑定最底层的鼠标事件
+        self.bind("<Button-1>", self.on_press)        # 按下
+        self.bind("<ButtonRelease-1>", self.on_release) # 松开
+        
+    def on_press(self, event):
+        # 检查是否被禁用
+        if self['state'] == 'disabled':
+            return
+            
+        # 视觉反馈：按下时变成凹陷效果
+        self.config(relief="sunken", bg="#D0D0D0")
+        
+        # 【核心】按下即触发，无需等待松开，手感最快
+        if self.user_command:
+            # 使用 after(10) 防止阻塞导致视觉反馈看不见
+            self.after(10, self.user_command)
+
+    def on_release(self, event):
+        if self['state'] == 'disabled':
+            return
+        # 松开时恢复凸起效果
+        default_bg = "#ECECEC" if sys.platform == "darwin" else "#F0F0F0"
+        self.config(relief="raised", bg=default_bg)
+
+# =========================================================================
+# 主程序
+# =========================================================================
 class DecoupleApp:
     CONFIG_FILE = "config.json"
     
@@ -30,7 +81,6 @@ class DecoupleApp:
             except Exception:
                 pass
         
-        # 初始化变量
         self.dir_rgb = tk.StringVar()
         self.dir_input = tk.StringVar()
         self.dir_output = tk.StringVar()
@@ -47,57 +97,51 @@ class DecoupleApp:
         y = (hs/2) - (h/2)
         self.root.geometry('%dx%d+%d+%d' % (w, h, x, y))
 
-    # ================= 核心 UI 构造 =================
     def setup_ui(self):
-        main_frame = ttk.Frame(self.root, padding="20")
+        # 使用 tk.Frame 而不是 ttk.Frame，以便更好地控制背景色匹配
+        main_frame = tk.Frame(self.root, padx=20, pady=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        main_frame.columnconfigure(1, weight=1)
-        
-        # 【关键修改 1】配置全局样式
-        style = ttk.Style()
-        # 定义一个 "大号按钮" 样式，增加内部填充(padding)
-        # padding=(左右, 上下)，这会让按钮实体变大，点击热区自然变大
-        style.configure("Large.TButton", font=("Helvetica", 13), padding=(20, 10))
-        # 定义浏览按钮的样式
-        style.configure("Normal.TButton", padding=(10, 5))
-
+        # 路径选择区
         self.create_path_selector(main_frame, "RGB 校正文件夹:", self.dir_rgb, 0)
         self.create_path_selector(main_frame, "Input 待处理文件夹:", self.dir_input, 1)
         self.create_path_selector(main_frame, "Output 输出文件夹:", self.dir_output, 2)
 
+        # 进度条
         self.progress_var = tk.DoubleVar()
         self.progress = ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100)
         self.progress.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(30, 10))
 
-        self.status_label = ttk.Label(main_frame, text="就绪")
+        # 状态标签
+        self.status_label = tk.Label(main_frame, text="就绪", anchor="w")
         self.status_label.grid(row=4, column=0, columnspan=3, sticky="w")
 
         # 按钮区域
-        btn_frame = ttk.Frame(main_frame)
+        btn_frame = tk.Frame(main_frame)
         btn_frame.grid(row=5, column=0, columnspan=3, pady=20)
         
-        # 【关键修改 2】使用标准 ttk.Button + command + 自定义样式
-        # 放弃 bind，回归最标准的 command，解决拖拽Bug
-        self.btn_action = ttk.Button(
+        # 【使用自定义的 RobustButton】
+        self.btn_action = RobustButton(
             btn_frame, 
             text="开始处理", 
-            style="Large.TButton", # 使用大号样式
             command=self.toggle_process
         )
         self.btn_action.pack()
+        
+        # 配置列权重
+        main_frame.columnconfigure(1, weight=1)
 
     def create_path_selector(self, parent, label_text, var, row):
-        ttk.Label(parent, text=label_text, width=18).grid(row=row, column=0, sticky="w", pady=8)
-        ttk.Entry(parent, textvariable=var, width=45).grid(row=row, column=1, sticky="ew", padx=5, pady=8)
+        tk.Label(parent, text=label_text, width=18, anchor="w").grid(row=row, column=0, sticky="w", pady=8)
+        tk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="ew", padx=5, pady=8)
         
-        # 浏览按钮也使用标准 command 和样式
-        btn = ttk.Button(
+        # 【使用自定义的 RobustButton】
+        btn = RobustButton(
             parent, 
             text="浏览...", 
-            style="Normal.TButton",
             command=lambda: self.browse_dir(var)
         )
+        # 稍微调整一下 grid 参数以匹配新按钮的大小
         btn.grid(row=row, column=2, sticky="e", pady=8, padx=(5,0))
 
     def browse_dir(self, var):
@@ -108,7 +152,6 @@ class DecoupleApp:
     # ================= 按钮状态逻辑 =================
     
     def toggle_process(self):
-        # 使用 command 绑定后，禁用的按钮自动不可点，不需要手动检查 state
         if not self.is_running:
             self.start_process_logic()
         else:
@@ -187,7 +230,6 @@ class DecoupleApp:
         try:
             self.set_ui_state_running()
             self.root.config(cursor="watch")
-            # 【修改点】移除了"界面可能会短暂无响应"提示
             self.status_label.config(text="步骤 1/4: 准备校正矩阵...")
             self.root.update()
             
@@ -214,7 +256,6 @@ class DecoupleApp:
         matrix_path = os.path.join(dir_rgb, "calibration_matrix.npy")
         M_Final = None
         
-        # 检查缓存
         if os.path.exists(matrix_path):
             mod_time = time.ctime(os.path.getmtime(matrix_path))
             use_cache = messagebox.askyesno(
@@ -319,7 +360,6 @@ class DecoupleApp:
         if not msg: msg = "警告"
         messagebox.showwarning(title, msg)
 
-    # --- 算法部分 ---
     def get_roi_average(self, path, black_lvl):
         img = tifffile.imread(path)
         arr = img.astype(np.float64)
