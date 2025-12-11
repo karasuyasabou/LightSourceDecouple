@@ -6,30 +6,30 @@ import numpy as np
 import tifffile
 from pathlib import Path
 
-# 引入 PySide6 (Qt) 替代 Tkinter
+# 使用 PySide6 替代 Tkinter
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QLineEdit, QPushButton, QProgressBar, QFileDialog, 
-    QMessageBox, QGroupBox, QStyle
+    QMessageBox, QGroupBox, QGridLayout, QStyle
 )
-from PySide6.QtCore import Qt, QThread, Signal, QSize
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QSize, QSettings
+from PySide6.QtGui import QIcon, QPixmap, QAction
 
 # =========================================================================
 # 后台工作线程 (Worker)
-# 负责繁重的图像处理任务，避免阻塞 UI
 # =========================================================================
 class ProcessingWorker(QThread):
     progress_updated = Signal(int, str)  # 进度信号 (百分比, 状态文本)
     finished_success = Signal(str)       # 成功信号 (输出目录)
     finished_error = Signal(str)         # 失败信号 (错误信息)
-    request_confirm = Signal(str, str, dict) # 请求确认信号 (标题, 内容, 数据)
+    
+    # 增加一个信号用于请求确认，主线程处理完后通过 set_confirmation_result 返回
+    # 但为了简化逻辑，我们建议在 Start 前由主线程完成所有交互确认
 
-    def __init__(self, dirs, use_cache_decision=None):
+    def __init__(self, dirs, use_cache_override=None):
         super().__init__()
         self.dirs = dirs # [rgb_dir, input_dir, output_dir]
-        self.user_response = None # 用于存储用户对弹窗的反馈
-        self.use_cache_decision = use_cache_decision # True/False/None
+        self.use_cache_override = use_cache_override # True/False/None
         self._is_cancelled = False
 
     def cancel(self):
@@ -45,16 +45,12 @@ class ProcessingWorker(QThread):
             matrix_path = os.path.join(dir_rgb, "calibration_matrix.npy")
             M_Final = None
 
-            # 1.1 检查缓存
-            if os.path.exists(matrix_path) and self.use_cache_decision is None:
-                # 需要主线程询问用户
-                mod_time = time.ctime(os.path.getmtime(matrix_path))
-                # 发送信号等待主线程处理
-                pass 
-            
-            # 如果主线程决定使用缓存
-            if self.use_cache_decision is True and os.path.exists(matrix_path):
-                M_Final = np.load(matrix_path)
+            # 1.1 检查缓存策略 (由主线程传入)
+            if self.use_cache_override is True and os.path.exists(matrix_path):
+                try:
+                    M_Final = np.load(matrix_path)
+                except Exception as e:
+                    print(f"加载缓存失败: {e}")
             
             # 1.2 重新计算
             if M_Final is None:
@@ -65,7 +61,6 @@ class ProcessingWorker(QThread):
                     raise ValueError(f"RGB 文件夹必须包含且仅包含 3 张 TIFF 图片，当前找到 {len(files)} 张")
                 
                 vecs = []
-                file_names = []
                 
                 for idx, f in enumerate(files):
                     if self._is_cancelled: return
@@ -74,7 +69,6 @@ class ProcessingWorker(QThread):
                     path = os.path.join(dir_rgb, f)
                     vec = self.get_roi_average(path, black_level)
                     vecs.append(vec)
-                    file_names.append(f)
                 
                 vecs = np.array(vecs).T 
                 idx_r = np.argmax(vecs[0, :])
@@ -86,6 +80,7 @@ class ProcessingWorker(QThread):
                     raise ValueError("观测矩阵奇异，无法计算")
                 
                 M_inv = np.linalg.inv(M_obs)
+                # 行归一化
                 row_sums = M_inv.sum(axis=1, keepdims=True)
                 M_Final = M_inv / row_sums
                 
@@ -106,7 +101,8 @@ class ProcessingWorker(QThread):
                 
                 self.process_image(in_path, out_path, M_Final, black_level)
                 
-                prog = int(10 + (i + 1) / total * 80) # 10% -> 90%
+                # 进度 10% -> 90%
+                prog = int(10 + (i + 1) / total * 80)
                 self.progress_updated.emit(prog, f"正在处理: {fname}")
 
             # --- Step 3: Contact Sheet ---
@@ -139,6 +135,7 @@ class ProcessingWorker(QThread):
         pixels_corr = pixels @ M.T
         pixels_corr = np.clip(pixels_corr, 0, 65535)
         img_out_arr = pixels_corr.reshape(h, w, c).astype(np.uint16)
+        # 使用 LZW (zlib) 压缩
         tifffile.imwrite(out_path, img_out_arr, compression='zlib')
 
     def create_contact_sheet(self, output_dir):
@@ -187,12 +184,26 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("光源-CMOS去串扰工具")
-        self.setFixedSize(800, 350) # 固定大小
+        self.setFixedSize(800, 350)
         
-        # 确定配置文件路径 (使用标准系统路径)
-        self.config_path = self.get_standard_config_path()
+        # 路径变量
+        self.dir_rgb = ""
+        self.dir_input = ""
+        self.dir_output = ""
+        self.worker = None
+        self.is_running = False
         
-        # 设置图标
+        # 设置应用图标
+        self._setup_icon()
+        
+        # 初始化 UI
+        self.setup_ui()
+        
+        # 加载上次配置
+        self.load_settings()
+
+    def _setup_icon(self):
+        # 尝试加载 icon.png
         if hasattr(sys, '_MEIPASS'):
             base_path = sys._MEIPASS
         else:
@@ -201,43 +212,6 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        # 状态变量
-        self.dir_rgb = ""
-        self.dir_input = ""
-        self.dir_output = ""
-        self.worker = None
-        self.is_running = False
-
-        self.setup_ui()
-        self.load_settings()
-
-    def get_standard_config_path(self):
-        """获取跨平台的标准化配置文件路径"""
-        app_name = "DecoupleTool"
-        
-        if sys.platform == 'win32':
-            # Windows: %APPDATA%/DecoupleTool
-            base_dir = os.environ.get('APPDATA') or os.path.expanduser('~\\AppData\\Roaming')
-        elif sys.platform == 'darwin':
-            # macOS: ~/Library/Application Support/DecoupleTool
-            base_dir = os.path.expanduser('~/Library/Application Support')
-        else:
-            # Linux: ~/.config/DecoupleTool
-            base_dir = os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config')
-        
-        # 拼接应用文件夹
-        config_dir = os.path.join(base_dir, app_name)
-        
-        # 如果文件夹不存在，自动创建
-        if not os.path.exists(config_dir):
-            try:
-                os.makedirs(config_dir)
-            except Exception as e:
-                print(f"无法创建配置文件目录: {e}, 回退到临时目录")
-                return os.path.join(os.path.expanduser("~"), ".decouple_tool_config.json")
-        
-        return os.path.join(config_dir, "config.json")
-
     def setup_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -245,13 +219,34 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(15)
 
-        # 1. 路径选择区域
+        # 1. 路径设置组
         group_box = QGroupBox("路径设置")
-        group_layout = QGridLayout_Compat(group_box) # 使用自定义辅助函数简化布局
+        grid_layout = QGridLayout(group_box)
+        grid_layout.setSpacing(10)
         
-        self.edit_rgb = self.create_path_row(group_layout, 0, "RGB 校正文件夹:", self.browse_rgb)
-        self.edit_input = self.create_path_row(group_layout, 1, "Input 待处理文件夹:", self.browse_input)
-        self.edit_output = self.create_path_row(group_layout, 2, "Output 输出文件夹:", self.browse_output)
+        # RGB
+        grid_layout.addWidget(QLabel("RGB 校正文件夹:"), 0, 0)
+        self.edit_rgb = QLineEdit()
+        grid_layout.addWidget(self.edit_rgb, 0, 1)
+        btn_rgb = QPushButton("浏览...")
+        btn_rgb.clicked.connect(self.browse_rgb)
+        grid_layout.addWidget(btn_rgb, 0, 2)
+
+        # Input
+        grid_layout.addWidget(QLabel("Input 待处理文件夹:"), 1, 0)
+        self.edit_input = QLineEdit()
+        grid_layout.addWidget(self.edit_input, 1, 1)
+        btn_input = QPushButton("浏览...")
+        btn_input.clicked.connect(self.browse_input)
+        grid_layout.addWidget(btn_input, 1, 2)
+
+        # Output
+        grid_layout.addWidget(QLabel("Output 输出文件夹:"), 2, 0)
+        self.edit_output = QLineEdit()
+        grid_layout.addWidget(self.edit_output, 2, 1)
+        btn_output = QPushButton("浏览...")
+        btn_output.clicked.connect(self.browse_output)
+        grid_layout.addWidget(btn_output, 2, 2)
         
         main_layout.addWidget(group_box)
 
@@ -266,189 +261,107 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("就绪")
         main_layout.addWidget(self.status_label)
 
-        # 4. 按钮区域
+        # 4. 底部按钮区
         btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
+        btn_layout.addStretch() # 左侧弹簧
         
-        # 开始/停止按钮 (参考 PySide6 风格)
+        # 主按钮
         self.btn_action = QPushButton("开始处理")
-        self.btn_action.setMinimumWidth(120)
-        self.btn_action.setMinimumHeight(40)
-        # 设置一点样式
-        self.btn_action.setStyleSheet("""
-            QPushButton {
-                font-size: 14px;
-                font-weight: bold;
-                background-color: #007AFF; 
-                color: white;
-                border-radius: 6px;
-                padding: 5px;
-            }
-            QPushButton:pressed {
-                background-color: #005ecb;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-            }
-        """)
+        self.btn_action.setFixedSize(140, 40)
+        # 初始样式：蓝色主按钮
+        self.update_button_style(is_running=False)
         self.btn_action.clicked.connect(self.toggle_process)
+        
         btn_layout.addWidget(self.btn_action)
-
-        btn_layout.addStretch()
+        btn_layout.addStretch() # 右侧弹簧
+        
         main_layout.addLayout(btn_layout)
 
-    def create_path_row(self, layout, row, label_text, callback):
-        label = QLabel(label_text)
-        edit = QLineEdit()
-        btn = QPushButton("浏览...")
-        btn.clicked.connect(callback)
-        
-        layout.addWidget(label, row, 0)
-        layout.addWidget(edit, row, 1)
-        layout.addWidget(btn, row, 2)
-        return edit
-
-    # --- 浏览回调 ---
-    def browse_rgb(self): self._browse(self.edit_rgb)
-    def browse_input(self): self._browse(self.edit_input)
-    def browse_output(self): self._browse(self.edit_output)
-
-    def _browse(self, edit_widget):
-        current = edit_widget.text()
-        start_dir = current if os.path.exists(current) else os.getcwd()
-        path = QFileDialog.getExistingDirectory(self, "选择文件夹", start_dir)
-        if path:
-            edit_widget.setText(path)
-
-    # --- 逻辑控制 ---
-    def toggle_process(self):
-        if not self.is_running:
-            self.start_process()
-        else:
-            self.stop_process()
-
-    def start_process(self):
-        # 保存设置
-        self.dir_rgb = self.edit_rgb.text()
-        self.dir_input = self.edit_input.text()
-        self.dir_output = self.edit_output.text()
-        self.save_settings()
-
-        # 验证路径
-        if not all([self.dir_rgb, self.dir_input, self.dir_output]):
-            QMessageBox.critical(self, "错误", "路径不能为空")
-            return
-        
-        if not os.path.exists(self.dir_output):
-            try:
-                os.makedirs(self.dir_output)
-            except Exception as e:
-                QMessageBox.critical(self, "错误", f"无法创建输出目录: {e}")
-                return
-
-        # 检查缓存 (主线程逻辑)
-        matrix_path = os.path.join(self.dir_rgb, "calibration_matrix.npy")
-        use_cache = None
-        if os.path.exists(matrix_path):
-            mod_time = time.ctime(os.path.getmtime(matrix_path))
-            reply = QMessageBox.question(
-                self, "发现缓存", 
-                f"发现已存在的校正文件：\n修改时间: {mod_time}\n\n是否直接使用？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            use_cache = (reply == QMessageBox.StandardButton.Yes)
-
-        # 启动 Worker
-        self.worker = ProcessingWorker(
-            [self.dir_rgb, self.dir_input, self.dir_output], 
-            use_cache_decision=use_cache
-        )
-        self.worker.progress_updated.connect(self.update_progress)
-        self.worker.finished_success.connect(self.on_success)
-        self.worker.finished_error.connect(self.on_error)
-        
-        self.worker.start()
-        self.set_running_state(True)
-
-    def stop_process(self):
-        if self.worker and self.worker.isRunning():
-            self.status_label.setText("正在停止...")
-            self.worker.cancel()
-            # 按钮禁用，等待线程自然结束
-            self.btn_action.setEnabled(False)
-
-    def set_running_state(self, running):
-        self.is_running = running
-        if running:
+    def update_button_style(self, is_running):
+        if is_running:
             self.btn_action.setText("停止")
+            # 运行时：灰色样式
             self.btn_action.setStyleSheet("""
                 QPushButton {
-                    font-size: 14px; font-weight: bold;
-                    background-color: #e0e0e0; color: black;
-                    border: 1px solid #c0c0c0; border-radius: 6px; padding: 5px;
+                    font-size: 14px;
+                    font-weight: bold;
+                    background-color: #E0E0E0;
+                    color: black;
+                    border: 1px solid #C0C0C0;
+                    border-radius: 6px;
                 }
-                QPushButton:hover { background-color: #d0d0d0; }
+                QPushButton:hover {
+                    background-color: #D0D0D0;
+                }
             """)
-            self.edit_rgb.setEnabled(False)
-            self.edit_input.setEnabled(False)
-            self.edit_output.setEnabled(False)
         else:
             self.btn_action.setText("开始处理")
-            self.btn_action.setEnabled(True)
+            # 默认：蓝色主按钮样式
             self.btn_action.setStyleSheet("""
                 QPushButton {
-                    font-size: 14px; font-weight: bold;
-                    background-color: #007AFF; color: white;
-                    border-radius: 6px; padding: 5px;
+                    font-size: 14px;
+                    font-weight: bold;
+                    background-color: #007AFF;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
                 }
-                QPushButton:pressed { background-color: #005ecb; }
+                QPushButton:hover {
+                    background-color: #0069D9;
+                }
+                QPushButton:pressed {
+                    background-color: #0051A8;
+                }
+                QPushButton:disabled {
+                    background-color: #CCCCCC;
+                }
             """)
-            self.edit_rgb.setEnabled(True)
-            self.edit_input.setEnabled(True)
-            self.edit_output.setEnabled(True)
-            self.status_label.setText("就绪")
-            self.progress_bar.setValue(0)
 
-    def update_progress(self, val, msg):
-        self.progress_bar.setValue(val)
-        self.status_label.setText(msg)
+    # --- 浏览逻辑 ---
+    def browse_rgb(self):
+        path = QFileDialog.getExistingDirectory(self, "选择 RGB 校正文件夹", self.edit_rgb.text())
+        if path: self.edit_rgb.setText(path)
 
-    def on_success(self, output_dir):
-        self.set_running_state(False)
-        QMessageBox.information(self, "完成", "处理完毕")
-        
-        # 打开文件夹
+    def browse_input(self):
+        path = QFileDialog.getExistingDirectory(self, "选择 Input 文件夹", self.edit_input.text())
+        if path: self.edit_input.setText(path)
+
+    def browse_output(self):
+        path = QFileDialog.getExistingDirectory(self, "选择 Output 文件夹", self.edit_output.text())
+        if path: self.edit_output.setText(path)
+
+    # --- 配置读写 (使用系统标准路径) ---
+    def get_config_path(self):
+        # 跨平台标准路径
+        app_name = "DecoupleTool"
         if sys.platform == 'win32':
-            os.startfile(output_dir)
+            base = os.environ.get('APPDATA') or os.path.expanduser('~\\AppData\\Roaming')
         elif sys.platform == 'darwin':
-            os.system(f'open "{output_dir}"')
+            base = os.path.expanduser('~/Library/Application Support')
         else:
-            os.system(f'xdg-open "{output_dir}"')
-
-    def on_error(self, err_msg):
-        self.set_running_state(False)
-        if "用户取消" not in err_msg: # 如果是用户手动取消不弹报错
-            QMessageBox.critical(self, "错误", f"发生错误: {err_msg}")
-        else:
-            self.status_label.setText("已取消")
-
-    # --- 配置读写 ---
-    def load_settings(self):
-        # 默认路径
-        cwd = os.getcwd()
-        defaults = {
-            "rgb": os.path.join(cwd, "RGB"),
-            "input": os.path.join(cwd, "input"),
-            "output": os.path.join(cwd, "output")
-        }
+            base = os.path.expanduser('~/.config')
         
-        # 尝试读取配置文件
-        if os.path.exists(self.config_path):
+        config_dir = os.path.join(base, app_name)
+        if not os.path.exists(config_dir):
             try:
-                with open(self.config_path, "r", encoding='utf-8') as f:
+                os.makedirs(config_dir)
+            except:
+                return os.path.join(os.path.expanduser("~"), ".decouple_tool_config.json")
+        return os.path.join(config_dir, "config.json")
+
+    def load_settings(self):
+        defaults = {
+            "rgb": os.path.join(os.getcwd(), "RGB"),
+            "input": os.path.join(os.getcwd(), "input"),
+            "output": os.path.join(os.getcwd(), "output")
+        }
+        cfg_path = self.get_config_path()
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     defaults.update(data)
-            except Exception: pass
+            except: pass
         
         self.edit_rgb.setText(defaults["rgb"])
         self.edit_input.setText(defaults["input"])
@@ -460,20 +373,107 @@ class MainWindow(QMainWindow):
             "input": self.edit_input.text(),
             "output": self.edit_output.text()
         }
+        cfg_path = self.get_config_path()
         try:
-            with open(self.config_path, "w", encoding='utf-8') as f:
+            with open(cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
-        except Exception: pass
+        except Exception as e:
+            print(f"保存配置失败: {e}")
 
-# 辅助类：因为PySide6的QGridLayout需要addWidget(widget, row, col)
-class QGridLayout_Compat:
-    def __init__(self, parent_groupbox):
-        self.layout = QGridLayout()
-        parent_groupbox.setLayout(self.layout)
-    def addWidget(self, w, r, c):
-        self.layout.addWidget(w, r, c)
+    # --- 核心控制 ---
+    def toggle_process(self):
+        if not self.is_running:
+            self.start_processing()
+        else:
+            self.stop_processing()
 
-from PySide6.QtWidgets import QGridLayout
+    def start_processing(self):
+        # 1. 保存配置
+        self.save_settings()
+        
+        # 2. 验证路径
+        d_rgb = self.edit_rgb.text()
+        d_in = self.edit_input.text()
+        d_out = self.edit_output.text()
+        
+        if not all([d_rgb, d_in, d_out]):
+            QMessageBox.critical(self, "错误", "路径不能为空")
+            return
+        
+        if not os.path.exists(d_out):
+            try:
+                os.makedirs(d_out)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"无法创建输出目录:\n{e}")
+                return
+
+        # 3. 检查缓存 (主线程交互)
+        use_cache = None
+        matrix_path = os.path.join(d_rgb, "calibration_matrix.npy")
+        if os.path.exists(matrix_path):
+            mod_time = time.ctime(os.path.getmtime(matrix_path))
+            reply = QMessageBox.question(
+                self, "发现缓存", 
+                f"发现已存在的校正文件：\n修改时间: {mod_time}\n\n是否直接使用？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            use_cache = (reply == QMessageBox.StandardButton.Yes)
+
+        # 4. 启动线程
+        self.worker = ProcessingWorker([d_rgb, d_in, d_out], use_cache_override=use_cache)
+        self.worker.progress_updated.connect(self.on_worker_progress)
+        self.worker.finished_success.connect(self.on_worker_success)
+        self.worker.finished_error.connect(self.on_worker_error)
+        
+        self.set_ui_running(True)
+        self.worker.start()
+
+    def stop_processing(self):
+        if self.worker and self.worker.isRunning():
+            self.status_label.setText("正在停止...")
+            self.btn_action.setEnabled(False) # 防止重复点击
+            self.worker.cancel()
+            # 线程由于是 loop 检查 _is_cancelled，需要一点时间退出
+            # 退出后会触发 finished 信号，我们在那里恢复 UI
+
+    def set_ui_running(self, running):
+        self.is_running = running
+        self.update_button_style(running)
+        self.edit_rgb.setEnabled(not running)
+        self.edit_input.setEnabled(not running)
+        self.edit_output.setEnabled(not running)
+        
+        if running:
+            self.progress_bar.setValue(0)
+        else:
+            self.btn_action.setEnabled(True)
+            self.status_label.setText("就绪")
+
+    @Slot(int, str)
+    def on_worker_progress(self, val, msg):
+        self.progress_bar.setValue(val)
+        self.status_label.setText(msg)
+
+    @Slot(str)
+    def on_worker_success(self, output_dir):
+        self.set_ui_running(False)
+        QMessageBox.information(self, "完成", "处理完毕")
+        # 打开文件夹
+        if sys.platform == 'win32':
+            os.startfile(output_dir)
+        elif sys.platform == 'darwin':
+            os.system(f'open "{output_dir}"')
+        else:
+            os.system(f'xdg-open "{output_dir}"')
+
+    @Slot(str)
+    def on_worker_error(self, err_msg):
+        self.set_ui_running(False)
+        # 如果不是用户手动取消，弹窗报错
+        if "用户取消" not in err_msg and self.status_label.text() != "正在停止...":
+             QMessageBox.critical(self, "错误", f"发生错误:\n{err_msg}")
+        else:
+            self.status_label.setText("已取消")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
