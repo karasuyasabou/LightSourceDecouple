@@ -24,7 +24,8 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --noconsole --windowed --name="DecoupleTool" --add-data "icon.png:." decouple_tool.py
+        # 关键修改：
+        pyinstaller --noconsole --windowed --name="DecoupleTool" --icon="icon.icns" --add-data "icon.png:." decouple_tool.py
 
     - name: Compress App
       run: |
