@@ -49,7 +49,6 @@ class DecoupleApp:
 
     # ================= 核心 UI 构造 =================
     def setup_ui(self):
-        # 使用 ttk.Frame 获得原生背景色
         main_frame = ttk.Frame(self.root, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -70,45 +69,21 @@ class DecoupleApp:
         btn_frame = ttk.Frame(main_frame)
         btn_frame.grid(row=5, column=0, columnspan=3, pady=20)
         
-        # 【关键修改 1】回归 ttk.Button (原生样式)
-        # 不设置 style, bg, fg，让系统自动渲染最原生的 macOS 按钮
+        # 主操作按钮
         self.btn_action = ttk.Button(btn_frame, text="开始处理")
         self.btn_action.pack(ipadx=20, ipady=5)
         
-        # 【关键修改 2】应用“暴力点击”修复
-        self.bind_robust_click(self.btn_action, self.toggle_process)
+        # 【关键修改】使用 <Button-1> (按下即触发)
+        self.btn_action.bind("<Button-1>", lambda e: self.toggle_process())
 
     def create_path_selector(self, parent, label_text, var, row):
         ttk.Label(parent, text=label_text, width=18).grid(row=row, column=0, sticky="w", pady=8)
         ttk.Entry(parent, textvariable=var, width=45).grid(row=row, column=1, sticky="ew", padx=5, pady=8)
         
-        # 浏览按钮也使用原生 ttk 和暴力点击修复
+        # 浏览按钮也改为按下即触发
         btn = ttk.Button(parent, text="浏览...")
-        self.bind_robust_click(btn, lambda: self.browse_dir(var))
+        btn.bind("<Button-1>", lambda e: self.browse_dir(var))
         btn.grid(row=row, column=2, sticky="e", pady=8, padx=(5,0))
-
-    # ================= “暴力点击” 核心修复逻辑 =================
-    def bind_robust_click(self, widget, func):
-        """
-        绕过系统本身的 Click 事件，手动检测鼠标抬起时的坐标。
-        解决 macOS 上需要拖拽才能点击的 Bug。
-        """
-        def on_release(event):
-            # 如果按钮处于禁用状态，什么都不做
-            if str(widget['state']) == 'disabled':
-                return
-
-            # 获取鼠标相对于按钮左上角的坐标
-            x, y = event.x, event.y
-            # 获取按钮当前的宽和高
-            w, h = widget.winfo_width(), widget.winfo_height()
-            
-            # 【数学判定】只要鼠标松开时还在按钮矩形范围内，就触发
-            if 0 <= x <= w and 0 <= y <= h:
-                func()
-        
-        # 绑定“鼠标左键松开”事件
-        widget.bind("<ButtonRelease-1>", on_release)
 
     def browse_dir(self, var):
         initial = var.get() if os.path.exists(var.get()) else os.getcwd()
@@ -118,6 +93,10 @@ class DecoupleApp:
     # ================= 按钮状态逻辑 =================
     
     def toggle_process(self):
+        # 检查按钮是否被禁用 (虽然 bind 会绕过 state 检查，所以我们需要手动检查)
+        if str(self.btn_action['state']) == 'disabled':
+            return
+
         if not self.is_running:
             self.start_process_logic()
         else:
@@ -174,7 +153,7 @@ class DecoupleApp:
         except Exception as e:
             print(f"保存配置失败: {e}")
 
-    # ================= 核心处理逻辑 (不变) =================
+    # ================= 核心处理逻辑 =================
     
     def start_process_logic(self):
         self.save_settings()
@@ -196,7 +175,8 @@ class DecoupleApp:
         try:
             self.set_ui_state_running()
             self.root.config(cursor="watch")
-            self.status_label.config(text="步骤 1/4: 准备校正矩阵 (界面可能会短暂无响应)...")
+            # 【修改点】删除了关于无响应的提示文字
+            self.status_label.config(text="步骤 1/4: 准备校正矩阵...")
             self.root.update()
             
             M_Final = self.prepare_matrix(dirs[0])
