@@ -49,9 +49,7 @@ class ProcessingWorker(QThread):
             if os.path.exists(matrix_path) and self.use_cache_decision is None:
                 # 需要主线程询问用户
                 mod_time = time.ctime(os.path.getmtime(matrix_path))
-                # 发送信号等待主线程处理（这里通过 wait 实现同步稍显复杂，
-                # 为简化逻辑，我们在主线程启动 worker 前先检查缓存更好。
-                # 但为了保持逻辑完整，这里假设主线程已经处理了缓存决策，或者我们重新计算）
+                # 发送信号等待主线程处理
                 pass 
             
             # 如果主线程决定使用缓存
@@ -82,10 +80,6 @@ class ProcessingWorker(QThread):
                 idx_r = np.argmax(vecs[0, :])
                 idx_g = np.argmax(vecs[1, :])
                 idx_b = np.argmax(vecs[2, :])
-                
-                # 这里本应弹窗确认识别结果，但在 Worker 线程中弹窗比较麻烦。
-                # 鉴于这是一个自动化工具，我们默认信任算法。
-                # 如果必须确认，可以像上面一样发信号。这里为了流畅性直接继续。
                 
                 M_obs = np.column_stack((vecs[:, idx_r], vecs[:, idx_g], vecs[:, idx_b]))
                 if np.linalg.cond(M_obs) > 1e15:
@@ -190,12 +184,13 @@ class ProcessingWorker(QThread):
 # 主窗口 (PySide6)
 # =========================================================================
 class MainWindow(QMainWindow):
-    CONFIG_FILE = "config.json"
-
     def __init__(self):
         super().__init__()
         self.setWindowTitle("光源-CMOS去串扰工具")
         self.setFixedSize(800, 350) # 固定大小
+        
+        # 确定配置文件路径 (使用标准系统路径)
+        self.config_path = self.get_standard_config_path()
         
         # 设置图标
         if hasattr(sys, '_MEIPASS'):
@@ -215,6 +210,33 @@ class MainWindow(QMainWindow):
 
         self.setup_ui()
         self.load_settings()
+
+    def get_standard_config_path(self):
+        """获取跨平台的标准化配置文件路径"""
+        app_name = "DecoupleTool"
+        
+        if sys.platform == 'win32':
+            # Windows: %APPDATA%/DecoupleTool
+            base_dir = os.environ.get('APPDATA') or os.path.expanduser('~\\AppData\\Roaming')
+        elif sys.platform == 'darwin':
+            # macOS: ~/Library/Application Support/DecoupleTool
+            base_dir = os.path.expanduser('~/Library/Application Support')
+        else:
+            # Linux: ~/.config/DecoupleTool
+            base_dir = os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config')
+        
+        # 拼接应用文件夹
+        config_dir = os.path.join(base_dir, app_name)
+        
+        # 如果文件夹不存在，自动创建
+        if not os.path.exists(config_dir):
+            try:
+                os.makedirs(config_dir)
+            except Exception as e:
+                print(f"无法创建配置文件目录: {e}, 回退到临时目录")
+                return os.path.join(os.path.expanduser("~"), ".decouple_tool_config.json")
+        
+        return os.path.join(config_dir, "config.json")
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -412,15 +434,18 @@ class MainWindow(QMainWindow):
 
     # --- 配置读写 ---
     def load_settings(self):
+        # 默认路径
         cwd = os.getcwd()
         defaults = {
             "rgb": os.path.join(cwd, "RGB"),
             "input": os.path.join(cwd, "input"),
             "output": os.path.join(cwd, "output")
         }
-        if os.path.exists(self.CONFIG_FILE):
+        
+        # 尝试读取配置文件
+        if os.path.exists(self.config_path):
             try:
-                with open(self.CONFIG_FILE, "r", encoding='utf-8') as f:
+                with open(self.config_path, "r", encoding='utf-8') as f:
                     data = json.load(f)
                     defaults.update(data)
             except Exception: pass
@@ -436,7 +461,7 @@ class MainWindow(QMainWindow):
             "output": self.edit_output.text()
         }
         try:
-            with open(self.CONFIG_FILE, "w", encoding='utf-8') as f:
+            with open(self.config_path, "w", encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
         except Exception: pass
 
