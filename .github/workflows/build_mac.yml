@@ -24,8 +24,7 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        # 使用 --windowed 生成 .app 包
-        pyinstaller --noconsole --windowed --name="DecoupleTool" decouple_tool.py
+        pyinstaller --noconsole --windowed --name="DecoupleTool" --add-data "icon.png:." decouple_tool.py
 
     - name: Compress App
       run: |
