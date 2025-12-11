@@ -25,9 +25,8 @@ jobs:
             sep: ':'
             artifact_name: DecoupleTool-macOS-arm64.zip
           
-          # Intel Mac (x64) - Use macos-13 (Native Intel) to avoid Rosetta issues
-          # While macos-13 is deprecated, it is the only reliable way to get native x64 environment currently.
-          - os: macos-13
+          # Intel Mac (x64) - Build on macOS 14 via Rosetta (x64 Python)
+          - os: macos-14
             platform: macos
             arch: x64
             python_arch: x64
