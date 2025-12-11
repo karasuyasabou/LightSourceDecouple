@@ -1,40 +1,111 @@
-name: Build Mac App
+name: Build Decouple Tool
 
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: # 允许手动点击按钮触发
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-latest  # 关键：指定运行在 macOS 上
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos
+            icon_file: icon.icns
+            sep: ':'
+            artifact_name: DecoupleTool-macOS.zip
+          - os: windows-latest
+            platform: windows
+            icon_file: icon.ico
+            sep: ';'
+            artifact_name: DecoupleTool-Windows.exe
 
     steps:
-    - uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
+    # 参考：锁定 Python 3.11 版本
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.9' # 建议使用 3.9 或 3.10，兼容性好
+        python-version: '3.11'
 
-    - name: Install Dependencies
+    # 安装依赖
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install numpy pillow pyinstaller tifffile
+        # 安装项目所需的库 + 打包工具 + 图片处理库(用于生成图标)
+        pip install numpy tifffile Pillow pyinstaller
 
+    # 参考：macOS 自动生成 .icns 图标
+    # 不需要你手动转换了，这里用系统自带工具 sips 自动切图并合成
+    - name: Generate App Icon (macOS)
+      if: matrix.platform == 'macos'
+      run: |
+        if [ ! -f "icon.png" ]; then echo "::warning::icon.png not found"; exit 0; fi
+        mkdir -p icons.iconset
+        sips -z 16 16     "icon.png" --out icons.iconset/icon_16x16.png
+        sips -z 32 32     "icon.png" --out icons.iconset/icon_16x16@2x.png
+        sips -z 32 32     "icon.png" --out icons.iconset/icon_32x32.png
+        sips -z 64 64     "icon.png" --out icons.iconset/icon_32x32@2x.png
+        sips -z 128 128   "icon.png" --out icons.iconset/icon_128x128.png
+        sips -z 256 256   "icon.png" --out icons.iconset/icon_128x128@2x.png
+        sips -z 256 256   "icon.png" --out icons.iconset/icon_256x256.png
+        sips -z 512 512   "icon.png" --out icons.iconset/icon_256x256@2x.png
+        sips -z 512 512   "icon.png" --out icons.iconset/icon_512x512.png
+        sips -z 1024 1024 "icon.png" --out icons.iconset/icon_512x512@2x.png
+        iconutil -c icns -o icon.icns icons.iconset
+        echo "✅ Generated icon.icns"
+
+    # 参考：Windows 自动生成 .ico 图标
+    - name: Generate App Icon (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        python -c "from PIL import Image; img=Image.open('icon.png'); img.save('icon.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+        echo "✅ Generated icon.ico"
+
+    # 打包流程
     - name: Build with PyInstaller
+      shell: bash
       run: |
-        # 关键修改：
-        pyinstaller --noconsole --windowed --name="DecoupleTool" --icon="icon.icns" --add-data "icon.png:." decouple_tool.py
+        # 动态设置图标参数
+        ICON_ARG=""
+        if [ -f "${{ matrix.icon_file }}" ]; then ICON_ARG="--icon=${{ matrix.icon_file }}"; fi
+        
+        # 运行打包
+        # --windowed: 无黑框
+        # --noconsole: 同上
+        # --add-data: 把 icon.png 打包进程序内部（用于窗口左上角显示）
+        pyinstaller --clean --noconfirm --windowed --noconsole \
+          --name "DecoupleTool" \
+          $ICON_ARG \
+          --add-data "icon.png${{ matrix.sep }}." \
+          decouple_tool.py
 
-    - name: Compress App
+    # 参考：使用 ditto 进行 macOS 压缩（比 zip 更保留权限）
+    - name: Package macOS App
+      if: matrix.platform == 'macos'
       run: |
-        # GitHub Artifacts 上传文件夹比较慢，建议先压缩成 zip
         cd dist
-        zip -r DecoupleTool_Mac.zip DecoupleTool.app
+        # 使用 ditto 压缩 .app，保留资源分支和权限
+        ditto -c -k --sequesterRsrc --keepParent DecoupleTool.app DecoupleTool-macOS.zip
 
-    - name: Upload Artifact
+    # 上传 macOS 结果
+    - name: Upload Artifact (macOS)
+      if: matrix.platform == 'macos'
       uses: actions/upload-artifact@v4
       with:
-        name: Mac-App-Build
-        path: dist/DecoupleTool_Mac.zip
+        name: DecoupleTool-macOS
+        path: dist/DecoupleTool-macOS.zip
+
+    # 上传 Windows 结果
+    - name: Upload Artifact (Windows)
+      if: matrix.platform == 'windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: DecoupleTool-Windows
+        path: dist/DecoupleTool.exe
