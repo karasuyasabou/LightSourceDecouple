@@ -2,18 +2,16 @@ import os
 import time
 import sys
 import numpy as np
-from PIL import Image
+import tifffile  # 【关键修改】使用 tifffile 替代 Pillow 进行 TIFF I/O
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import threading
 
-# 增加最大图像像素限制（防止处理大图报错）
-Image.MAX_IMAGE_PIXELS = None
-
 class DecoupleApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("光源-CMOS去串扰工具 (Python版)")
+        # 【修改点 1】修改标题
+        self.root.title("光源-CMOS去串扰工具")
         self.center_window(600, 320)
         
         # 路径变量
@@ -122,13 +120,14 @@ class DecoupleApp:
             
             # 检查缓存
             if os.path.exists(matrix_path):
-                # 在非主线程使用 messagebox 需要注意，但在 simple threading 中通常可行
-                # 严格来说应该用 queue 通信，但这里简化处理
-                # 注意：PyInstaller 打包后的 tkinter 多线程弹窗偶尔会有问题
-                # 但在这个简单逻辑中通常能跑通
-                # 为了稳健，我们可以简化逻辑：如果存在且可读，直接用，或者仅在控制台打印
-                # 这里保持原逻辑尝试
-                M_Final = np.load(matrix_path)
+                # 主线程弹窗逻辑简化，直接在子线程调用（Tkinter通常允许简单的messagebox跨线程）
+                mod_time = time.ctime(os.path.getmtime(matrix_path))
+                use_cache = messagebox.askyesno(
+                    "发现缓存", 
+                    f"发现已存在的校正文件：\n修改时间: {mod_time}\n\n是否直接使用？"
+                )
+                if use_cache:
+                    M_Final = np.load(matrix_path)
             
             # 重新计算
             if M_Final is None:
@@ -156,10 +155,14 @@ class DecoupleApp:
                 idx_g = np.argmax(vecs[1, :])
                 idx_b = np.argmax(vecs[2, :])
                 
-                # 在子线程弹窗需要谨慎，建议简化为直接处理，或者使用 update_idletasks
-                # 这里假设用户提供的数据是正确的，自动识别后直接处理，避免子线程弹窗卡死
-                # 改进：如果需要确认，应该在 start_thread 前检查好，或者由主线程调度
-                # 为防止 Mac 上子线程 GUI 崩溃，这里跳过弹窗确认，直接信任算法
+                # 用户确认
+                msg = (f"R: {file_names[idx_r]}\n"
+                       f"G: {file_names[idx_g]}\n"
+                       f"B: {file_names[idx_b]}\n\n"
+                       "识别结果是否正确？")
+                
+                if not messagebox.askyesno("确认", msg):
+                    raise InterruptedError("用户取消")
                 
                 M_obs = np.column_stack((vecs[:, idx_r], vecs[:, idx_g], vecs[:, idx_b]))
                 
@@ -230,9 +233,9 @@ class DecoupleApp:
         self.is_cancelled = False
 
     def get_roi_average(self, path, black_lvl):
-        # 读取 16-bit 图像
-        with Image.open(path) as img:
-            arr = np.array(img).astype(np.float64)
+        # 【修改点】使用 tifffile 读取，原生支持 16-bit
+        img = tifffile.imread(path)
+        arr = img.astype(np.float64)
         
         arr = arr - black_lvl
         h, w = arr.shape[:2]
@@ -243,32 +246,28 @@ class DecoupleApp:
         else:
             roi = arr
             
-        return np.mean(roi, axis=(0, 1)) # 返回 [R_mean, G_mean, B_mean]
+        return np.mean(roi, axis=(0, 1))
 
     def process_image(self, in_path, out_path, M, black_lvl):
-        with Image.open(in_path) as img:
-            # 保持 16-bit 原始数据
-            arr = np.array(img).astype(np.float64)
+        # 【修改点】使用 tifffile 读取
+        arr = tifffile.imread(in_path).astype(np.float64)
             
         arr = arr - black_lvl
         h, w, c = arr.shape
         
-        # 矩阵运算 (Reshape -> Dot -> Reshape)
+        # 矩阵运算
         pixels = arr.reshape(-1, 3)
-        # Python dot 是右乘，M 是 (3,3)，pixels 是 (N,3)。
-        # 公式: Output = M * Input^T -> Output^T = Input * M^T
-        # 所以这里我们要用 pixels @ M.T
         pixels_corr = pixels @ M.T
         
         # 裁切
         pixels_corr = np.clip(pixels_corr, 0, 65535)
         
-        # 还原并保存
+        # 还原
         img_out_arr = pixels_corr.reshape(h, w, c).astype(np.uint16)
-        img_out = Image.fromarray(img_out_arr)
         
-        # 保存 LZW 压缩 (tiff_lzw)
-        img_out.save(out_path, compression="tiff_lzw")
+        # 【修改点】使用 tifffile 保存，完美支持 16-bit RGB
+        # compression='zlib' 等同于 LZW 效果，无损压缩
+        tifffile.imwrite(out_path, img_out_arr, compression='zlib')
 
     def create_contact_sheet(self, output_dir):
         files = [f for f in os.listdir(output_dir) if f.lower().endswith(('.tif', '.tiff')) 
@@ -279,18 +278,21 @@ class DecoupleApp:
         imgs = []
         max_w, max_h = 0, 0
         
-        # 第一次遍历：缩小图片并找最大尺寸
+        # 第一次遍历
         for f in files:
             path = os.path.join(output_dir, f)
-            with Image.open(path) as img:
-                # 缩小 10 倍，使用 Lanczos 算法保证质量
-                w, h = img.size
-                new_size = (int(w * 0.1), int(h * 0.1))
-                img_small = img.resize(new_size, Image.Resampling.LANCZOS)
-                
-                imgs.append(img_small)
-                max_w = max(max_w, new_size[0])
-                max_h = max(max_h, new_size[1])
+            # 使用 tifffile 读取，确保 16-bit 兼容
+            img = tifffile.imread(path)
+            
+            # 【修改点】使用 Numpy 切片进行缩小 (10倍)
+            # 这种方式不依赖 OpenCV/Scipy，且原生支持 16-bit 数据
+            # img[::10, ::10, :] 表示长宽每隔10个像素取一个点
+            img_small = img[::10, ::10, :]
+            
+            imgs.append(img_small)
+            h, w = img_small.shape[:2]
+            max_w = max(max_w, w)
+            max_h = max(max_h, h)
         
         if not imgs: return
 
@@ -301,20 +303,24 @@ class DecoupleApp:
         canvas_w = cols * max_w
         canvas_h = rows * max_h
         
-        contact_sheet = Image.new("RGB", (canvas_w, canvas_h), (0, 0, 0))
+        # 创建黑色背景画布 (16-bit)
+        contact_sheet = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint16)
         
         # 拼图
         for idx, img in enumerate(imgs):
+            h, w = img.shape[:2]
             row = idx // cols
             col = idx % cols
             
             x = col * max_w
             y = row * max_h
             
-            contact_sheet.paste(img, (x, y))
+            # 填入画布
+            contact_sheet[y:y+h, x:x+w, :] = img
         
         save_path = os.path.join(output_dir, "contactsheet.tiff")
-        contact_sheet.save(save_path, compression="tiff_lzw")
+        # 保存 contact sheet
+        tifffile.imwrite(save_path, contact_sheet, compression='zlib')
 
 
 if __name__ == "__main__":
