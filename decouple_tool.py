@@ -42,6 +42,9 @@ class DecoupleApp:
         main_frame = ttk.Frame(self.root, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # 【修改点 1】配置列权重，让中间列(输入框)自动拉伸，防止挤压右侧按钮
+        main_frame.columnconfigure(1, weight=1)
+
         self.create_path_selector(main_frame, "RGB 校正文件夹:", self.dir_rgb, 0)
         self.create_path_selector(main_frame, "Input 待处理文件夹:", self.dir_input, 1)
         self.create_path_selector(main_frame, "Output 输出文件夹:", self.dir_output, 2)
@@ -68,8 +71,13 @@ class DecoupleApp:
         self.is_cancelled = False
 
     def create_path_selector(self, parent, label_text, var, row):
+        # 【修改点 2】Label 固定宽度
         ttk.Label(parent, text=label_text, width=18).grid(row=row, column=0, sticky="w", pady=8)
-        ttk.Entry(parent, textvariable=var, width=70).grid(row=row, column=1, sticky="w", padx=5, pady=8)
+        
+        # 【修改点 3】Entry 宽度改小(作为最小宽度)，并设置 sticky="ew" 让其自动填满剩余空间
+        ttk.Entry(parent, textvariable=var, width=45).grid(row=row, column=1, sticky="ew", padx=5, pady=8)
+        
+        # 【修改点 4】Button 放在最右侧，不再会被挤出屏幕
         ttk.Button(parent, text="浏览...", command=lambda: self.browse_dir(var)).grid(row=row, column=2, sticky="e", pady=8)
 
     def browse_dir(self, var):
@@ -81,16 +89,14 @@ class DecoupleApp:
         self.is_cancelled = True
         self.status_label.config(text="正在取消...")
 
-    # ================= 核心逻辑重构 =================
+    # ================= 核心逻辑 =================
     
     def start_process_logic(self):
-        """主入口：先在主线程准备矩阵，再去子线程跑批量"""
         self.btn_start.config(state=tk.DISABLED)
         self.btn_cancel.config(state=tk.NORMAL)
         self.is_cancelled = False
         self.progress_var.set(0)
         
-        # 1. 检查路径
         dirs = [self.dir_rgb.get(), self.dir_input.get(), self.dir_output.get()]
         for d in dirs:
             if not d:
@@ -106,24 +112,18 @@ class DecoupleApp:
                 self.reset_ui()
                 return
 
-        # 2. 【主线程执行】获取/计算矩阵
-        # 移到主线程是为了保证弹窗 (messagebox) 绝对稳定，不会出现空白框
         try:
-            self.root.config(cursor="watch") # 鼠标变沙漏
+            self.root.config(cursor="watch")
             self.status_label.config(text="步骤 1/4: 准备校正矩阵 (界面可能会短暂无响应)...")
-            self.root.update() # 强制刷新界面
+            self.root.update()
             
             M_Final = self.prepare_matrix(dirs[0])
             
             if M_Final is None: 
-                # 这里通常是因为用户点了取消或者逻辑中断，UI已经在prepare_matrix里重置了吗？
-                # 如果是 raise Error 出来的，会被下面的 except 捕获
-                # 如果是 None 但没报错，说明是逻辑上的取消
                 self.reset_ui()
                 return
 
-            # 3. 【子线程执行】矩阵准备好后，开启线程跑批量
-            self.root.config(cursor="") # 恢复鼠标
+            self.root.config(cursor="")
             threading.Thread(target=self.run_batch_thread, args=(dirs[1], dirs[2], M_Final), daemon=True).start()
             
         except InterruptedError:
@@ -136,12 +136,10 @@ class DecoupleApp:
             self.root.config(cursor="")
 
     def prepare_matrix(self, dir_rgb):
-        """计算矩阵 (运行在主线程，允许直接弹窗)"""
         black_level = 0
         matrix_path = os.path.join(dir_rgb, "calibration_matrix.npy")
         M_Final = None
         
-        # A. 检查缓存
         if os.path.exists(matrix_path):
             mod_time = time.ctime(os.path.getmtime(matrix_path))
             use_cache = messagebox.askyesno(
@@ -152,7 +150,6 @@ class DecoupleApp:
                 return np.load(matrix_path)
             if self.is_cancelled: raise InterruptedError()
 
-        # B. 重新计算
         files = [f for f in os.listdir(dir_rgb) if f.lower().endswith(('.tif', '.tiff'))]
         if len(files) != 3:
             raise ValueError(f"RGB 文件夹必须包含且仅包含 3 张 TIFF 图片，当前找到 {len(files)} 张")
@@ -163,7 +160,6 @@ class DecoupleApp:
         for idx, f in enumerate(files):
             if self.is_cancelled: raise InterruptedError()
             
-            # 读取大文件时刷新一下界面，防止完全假死
             self.status_label.config(text=f"正在读取校正图片: {f} ...")
             self.root.update() 
             
@@ -195,21 +191,17 @@ class DecoupleApp:
         row_sums = M_inv.sum(axis=1, keepdims=True)
         M_Final = M_inv / row_sums
         
-        # 保存
         np.save(matrix_path, M_Final)
         return M_Final
 
     def run_batch_thread(self, dir_input, dir_output, M_Final):
-        """批量处理 (运行在子线程，禁止直接弹窗)"""
         try:
             black_level = 0
             
-            # 线程安全的 UI 更新函数
             def update_status(text, val):
                 self.status_label.config(text=text)
                 self.progress_var.set(val)
             
-            # --- 步骤 2: 批量处理 ---
             self.root.after(0, update_status, "步骤 2/4: 正在处理图片...", 0)
             
             input_files = [f for f in os.listdir(dir_input) if f.lower().endswith(('.tif', '.tiff'))]
@@ -224,23 +216,19 @@ class DecoupleApp:
                 
                 self.process_image(in_path, out_path, M_Final, black_level)
                 
-                # 线程安全更新进度
                 prog = (i + 1) / total * 90
                 self.root.after(0, update_status, f"正在处理: {fname}", prog)
 
-            # --- 步骤 3: Contact Sheet ---
             self.root.after(0, update_status, "步骤 3/4: 生成缩略图总览...", 90)
             self.create_contact_sheet(dir_output)
             self.root.after(0, update_status, "完成", 100)
 
-            # --- 完成 ---
             self.root.after(0, self.on_success, dir_output)
 
         except InterruptedError:
             self.root.after(0, lambda: self.safe_showwarning("取消", "用户取消处理"))
             self.root.after(0, self.reset_ui)
         except Exception as e:
-            # 捕获所有错误并安全传回主线程显示
             err_msg = str(e) if str(e) else f"未知错误: {type(e).__name__}"
             self.root.after(0, lambda: self.safe_showerror("错误", err_msg))
             self.root.after(0, self.reset_ui)
@@ -249,7 +237,6 @@ class DecoupleApp:
         self.reset_ui()
         messagebox.showinfo("完成", "处理完毕")
         
-        # 打开文件夹
         if sys.platform == 'win32':
             os.startfile(dir_output)
         elif sys.platform == 'darwin':
@@ -264,7 +251,6 @@ class DecoupleApp:
         self.root.config(cursor="")
         self.is_cancelled = False
 
-    # 封装安全弹窗，防止空消息
     def safe_showerror(self, title, msg):
         if not msg: msg = "发生未知错误"
         messagebox.showerror(title, msg)
@@ -273,7 +259,6 @@ class DecoupleApp:
         if not msg: msg = "警告"
         messagebox.showwarning(title, msg)
 
-    # --- 图像处理核心算法 (不变) ---
     def get_roi_average(self, path, black_lvl):
         img = tifffile.imread(path)
         arr = img.astype(np.float64)
