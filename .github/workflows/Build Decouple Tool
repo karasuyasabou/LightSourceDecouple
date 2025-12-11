@@ -16,14 +16,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 参考：使用 macos-14 (Apple Silicon) 作为构建环境
+          # Apple Silicon (M1/M2/M3)
           - os: macos-14
             platform: macos
             arch: arm64
             icon_file: icons/app.icns
             sep: ':'
             artifact_name: DecoupleTool-macOS-arm64.zip
-          # 参考：Windows 构建
+          
+          # 【新增】Intel Mac (x64) - 使用 macos-13 (Ventura) 作为最后的 Intel runner
+          - os: macos-13
+            platform: macos
+            arch: x64
+            icon_file: icons/app.icns
+            sep: ':'
+            artifact_name: DecoupleTool-macOS-x64.zip
+
+          # Windows
           - os: windows-latest
             platform: windows
             arch: x64
@@ -35,26 +44,22 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 参考：锁定 Python 3.11 版本
     - name: Set up Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
 
-    # 安装依赖
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip setuptools wheel
-        # 核心依赖：PySide6 (GUI), numpy (计算), tifffile (16bit IO), imagecodecs (压缩), Pillow (图标处理)
+        # 依赖中加入了 PySide6
         pip install PySide6 numpy tifffile imagecodecs Pillow pyinstaller pyinstaller-hooks-contrib
 
-    # 参考：macOS 自动生成 .icns 图标 (完整尺寸集)
     - name: Prepare app icon (macOS)
       if: matrix.platform == 'macos'
       run: |
         if [ ! -f "icon.png" ]; then echo "::warning::icon.png not found"; exit 0; fi
         mkdir -p icons/icon.iconset
-        # 生成标准 macOS 图标集
         sips -z 16 16     "icon.png" --out icons/icon.iconset/icon_16x16.png
         sips -z 32 32     "icon.png" --out icons/icon.iconset/icon_16x16@2x.png
         sips -z 32 32     "icon.png" --out icons/icon.iconset/icon_32x32.png
@@ -68,26 +73,20 @@ jobs:
         iconutil -c icns -o icons/app.icns icons/icon.iconset
         echo "✅ Generated icons/app.icns"
 
-    # 参考：Windows 自动生成 .ico 图标 (完整尺寸集)
     - name: Prepare app icon (Windows)
       if: matrix.platform == 'windows'
       run: |
         mkdir icons
-        # 使用 Python 生成多尺寸 ICO
         python -c "from PIL import Image; img=Image.open('icon.png'); img.save('icons/app.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
         echo "✅ Generated icons/app.ico"
 
-    # 打包流程
     - name: Build with PyInstaller
       run: |
-        # 动态设置图标参数
         ICON_ARG=""
         if [ -f "${{ matrix.icon_file }}" ]; then ICON_ARG="--icon=${{ matrix.icon_file }}"; fi
         
-        # 运行打包
-        # --collect-all imagecodecs: 确保 tifffile 的压缩功能正常工作
-        # --windowed: 无黑框
-        python -m PyInstaller --clean --noconfirm --windowed --noconsole \
+        # PySide6 打包需要 collect-all 防止动态库丢失
+        python -m PyInstaller --clean --noconfirm --windowed --noconsole --onefile \
           --name "DecoupleTool" \
           $ICON_ARG \
           --add-data "icon.png${{ matrix.sep }}." \
@@ -95,23 +94,19 @@ jobs:
           --collect-all tifffile \
           decouple_tool.py
 
-    # 参考：使用 ditto 进行 macOS 压缩（保留权限和元数据）
     - name: Package macOS App
       if: matrix.platform == 'macos'
       run: |
         cd dist
-        # 赋予可执行权限 (防止 macOS 提示损坏)
         chmod +x DecoupleTool.app/Contents/MacOS/DecoupleTool
         ditto -c -k --sequesterRsrc --keepParent DecoupleTool.app ${{ matrix.artifact_name }}
 
-    # Windows 压缩
     - name: Package Windows App
       if: matrix.platform == 'windows'
       run: |
         cd dist
         powershell Compress-Archive -Path DecoupleTool.exe -DestinationPath ${{ matrix.artifact_name }}
 
-    # 上传结果
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
