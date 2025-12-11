@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
+    name: Build on ${{ matrix.os }} (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -16,18 +16,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon (M1/M2/M3)
-          - os: macos-14
+          # Apple Silicon (M1/M2/M3) - Native build on macOS 15
+          - os: macos-15
             platform: macos
             arch: arm64
+            python_arch: arm64
             icon_file: icons/app.icns
             sep: ':'
             artifact_name: DecoupleTool-macOS-arm64.zip
           
-          # 【新增】Intel Mac (x64) - 使用 macos-13 (Ventura) 作为最后的 Intel runner
-          - os: macos-13
+          # Intel Mac (x64) - Build on macOS 15 via Rosetta (x64 Python)
+          # This satisfies the deprecation warning while still producing x64 binaries
+          - os: macos-15
             platform: macos
             arch: x64
+            python_arch: x64
             icon_file: icons/app.icns
             sep: ':'
             artifact_name: DecoupleTool-macOS-x64.zip
@@ -36,6 +39,7 @@ jobs:
           - os: windows-latest
             platform: windows
             arch: x64
+            python_arch: x64
             icon_file: icons/app.ico
             sep: ';'
             artifact_name: DecoupleTool-Windows-x64.zip
@@ -48,11 +52,12 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+        # Crucial: This forces the runner to use x64 Python on ARM macs for the Intel build
+        architecture: ${{ matrix.python_arch }}
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip setuptools wheel
-        # 依赖中加入了 PySide6
         pip install PySide6 numpy tifffile imagecodecs Pillow pyinstaller pyinstaller-hooks-contrib
 
     - name: Prepare app icon (macOS)
@@ -68,8 +73,8 @@ jobs:
         sips -z 256 256   "icon.png" --out icons/icon.iconset/icon_128x128@2x.png
         sips -z 256 256   "icon.png" --out icons/icon.iconset/icon_256x256.png
         sips -z 512 512   "icon.png" --out icons.iconset/icon_256x256@2x.png
-        sips -z 512 512   "icon.png" --out icons/icon.iconset/icon_512x512.png
-        sips -z 1024 1024 "icon.png" --out icons/icon.iconset/icon_512x512@2x.png
+        sips -z 512 512   "icon.png" --out icons.iconset/icon_512x512.png
+        sips -z 1024 1024 "icon.png" --out icons.iconset/icon_512x512@2x.png
         iconutil -c icns -o icons/app.icns icons/icon.iconset
         echo "✅ Generated icons/app.icns"
 
@@ -85,10 +90,21 @@ jobs:
         ICON_ARG=""
         if [ -f "${{ matrix.icon_file }}" ]; then ICON_ARG="--icon=${{ matrix.icon_file }}"; fi
         
-        # PySide6 打包需要 collect-all 防止动态库丢失
+        # Explicitly set target arch for macOS just to be safe
+        # (Though setup-python usually handles the environment correctly)
+        ARCH_ARG=""
+        if [ "${{ matrix.platform }}" = "macos" ]; then
+           if [ "${{ matrix.arch }}" = "x64" ]; then
+             ARCH_ARG="--target-arch x86_64"
+           elif [ "${{ matrix.arch }}" = "arm64" ]; then
+             ARCH_ARG="--target-arch arm64"
+           fi
+        fi
+
         python -m PyInstaller --clean --noconfirm --windowed --noconsole --onefile \
           --name "DecoupleTool" \
           $ICON_ARG \
+          $ARCH_ARG \
           --add-data "icon.png${{ matrix.sep }}." \
           --collect-all imagecodecs \
           --collect-all tifffile \
