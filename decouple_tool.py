@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import threading  # 【新增】用于线程同步等待
 import numpy as np
 import tifffile
 from pathlib import Path
@@ -19,18 +20,33 @@ from PySide6.QtGui import QIcon, QPixmap, QAction
 # 后台工作线程 (Worker)
 # =========================================================================
 class ProcessingWorker(QThread):
-    progress_updated = Signal(int, str)  # 进度信号 (百分比, 状态文本)
-    finished_success = Signal(str)       # 成功信号 (输出目录)
-    finished_error = Signal(str)         # 失败信号 (错误信息)
+    progress_updated = Signal(int, str)  # 进度信号
+    finished_success = Signal(str)       # 成功信号
+    finished_error = Signal(str)         # 失败信号
+    request_confirmation = Signal(str, str) # 【新增】请求确认信号 (标题, 内容)
     
     def __init__(self, dirs, use_cache_override=None):
         super().__init__()
-        self.dirs = dirs # [rgb_dir, input_dir, output_dir]
-        self.use_cache_override = use_cache_override # True/False/None
+        self.dirs = dirs 
+        self.use_cache_override = use_cache_override 
         self._is_cancelled = False
+        
+        # 线程同步工具
+        self._confirm_event = threading.Event()
+        self._confirm_result = False
 
     def cancel(self):
         self._is_cancelled = True
+        # 如果线程正阻塞在等待确认中，需要唤醒它以便它能检测到取消标志并退出
+        self._confirm_result = False 
+        self._confirm_event.set()
+
+    def _wait_for_user_choice(self, title, message):
+        """辅助函数：发送信号给UI并阻塞等待结果"""
+        self._confirm_event.clear() # 重置信号灯
+        self.request_confirmation.emit(title, message) # 通知UI弹窗
+        self._confirm_event.wait() # 阻塞等待UI唤醒
+        return self._confirm_result
 
     def run(self):
         try:
@@ -58,6 +74,7 @@ class ProcessingWorker(QThread):
                     raise ValueError(f"RGB 文件夹必须包含且仅包含 3 张 TIFF 图片，当前找到 {len(files)} 张")
                 
                 vecs = []
+                file_names = [] # 用于显示的文名列表
                 
                 for idx, f in enumerate(files):
                     if self._is_cancelled: return
@@ -66,18 +83,33 @@ class ProcessingWorker(QThread):
                     path = os.path.join(dir_rgb, f)
                     vec = self.get_roi_average(path, black_level)
                     vecs.append(vec)
+                    file_names.append(f)
                 
                 vecs = np.array(vecs).T 
                 idx_r = np.argmax(vecs[0, :])
                 idx_g = np.argmax(vecs[1, :])
                 idx_b = np.argmax(vecs[2, :])
                 
+                # 【新增】构造确认信息并暂停等待用户
+                msg_R = f"【红色文件 (R)】: {file_names[idx_r]}\n   识别均值: R={vecs[0, idx_r]:.0f}, G={vecs[1, idx_r]:.0f}, B={vecs[2, idx_r]:.0f}"
+                msg_G = f"【绿色文件 (G)】: {file_names[idx_g]}\n   识别均值: R={vecs[0, idx_g]:.0f}, G={vecs[1, idx_g]:.0f}, B={vecs[2, idx_g]:.0f}"
+                msg_B = f"【蓝色文件 (B)】: {file_names[idx_b]}\n   识别均值: R={vecs[0, idx_b]:.0f}, G={vecs[1, idx_b]:.0f}, B={vecs[2, idx_b]:.0f}"
+                
+                full_msg = f"自动识别结果如下，请确认是否正确：\n\n{msg_R}\n\n{msg_G}\n\n{msg_B}"
+                
+                # 阻塞等待主线程弹窗结果
+                if not self._wait_for_user_choice("确认校正信息", full_msg):
+                    # 用户选择了 No 或 Cancel
+                    if not self._is_cancelled: # 如果不是被停止按钮取消的，就是用户在弹窗点否
+                        self.finished_error.emit("用户取消处理")
+                    return 
+
+                # 用户确认后继续
                 M_obs = np.column_stack((vecs[:, idx_r], vecs[:, idx_g], vecs[:, idx_b]))
                 if np.linalg.cond(M_obs) > 1e15:
                     raise ValueError("观测矩阵奇异，无法计算")
                 
                 M_inv = np.linalg.inv(M_obs)
-                # 行归一化
                 row_sums = M_inv.sum(axis=1, keepdims=True)
                 M_Final = M_inv / row_sums
                 
@@ -98,7 +130,6 @@ class ProcessingWorker(QThread):
                 
                 self.process_image(in_path, out_path, M_Final, black_level)
                 
-                # 进度 10% -> 90%
                 prog = int(10 + (i + 1) / total * 80)
                 self.progress_updated.emit(prog, f"正在处理: {fname}")
 
@@ -132,7 +163,6 @@ class ProcessingWorker(QThread):
         pixels_corr = pixels @ M.T
         pixels_corr = np.clip(pixels_corr, 0, 65535)
         img_out_arr = pixels_corr.reshape(h, w, c).astype(np.uint16)
-        # 使用 LZW (zlib) 压缩
         tifffile.imwrite(out_path, img_out_arr, compression='zlib')
 
     def create_contact_sheet(self, output_dir):
@@ -146,8 +176,8 @@ class ProcessingWorker(QThread):
         for f in files:
             path = os.path.join(output_dir, f)
             img = tifffile.imread(path)
-            # 缩小 10 倍
-            img_small = img[::10, ::10, :]
+            # 缩小 5 倍 (原为 10 倍)
+            img_small = img[::5, ::5, :]
             imgs.append(img_small)
             h, w = img_small.shape[:2]
             max_w = max(max_w, w)
@@ -183,7 +213,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("光源-CMOS去串扰工具")
         self.setFixedSize(800, 350)
         
-        # 路径变量
         self.dir_rgb = ""
         self.dir_input = ""
         self.dir_output = ""
@@ -232,7 +261,6 @@ class MainWindow(QMainWindow):
         grid_layout = QGridLayout(group_box)
         grid_layout.setSpacing(10)
         
-        # RGB
         grid_layout.addWidget(QLabel("RGB 校正文件夹:"), 0, 0)
         self.edit_rgb = QLineEdit()
         grid_layout.addWidget(self.edit_rgb, 0, 1)
@@ -240,7 +268,6 @@ class MainWindow(QMainWindow):
         btn_rgb.clicked.connect(self.browse_rgb)
         grid_layout.addWidget(btn_rgb, 0, 2)
 
-        # Input
         grid_layout.addWidget(QLabel("Input 待处理文件夹:"), 1, 0)
         self.edit_input = QLineEdit()
         grid_layout.addWidget(self.edit_input, 1, 1)
@@ -248,7 +275,6 @@ class MainWindow(QMainWindow):
         btn_input.clicked.connect(self.browse_input)
         grid_layout.addWidget(btn_input, 1, 2)
 
-        # Output
         grid_layout.addWidget(QLabel("Output 输出文件夹:"), 2, 0)
         self.edit_output = QLineEdit()
         grid_layout.addWidget(self.edit_output, 2, 1)
@@ -269,7 +295,7 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("就绪")
         main_layout.addWidget(self.status_label)
 
-        # 4. 底部按钮区
+        # 4. 按钮区域
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         
@@ -280,7 +306,6 @@ class MainWindow(QMainWindow):
         
         btn_layout.addWidget(self.btn_action)
         btn_layout.addStretch()
-        
         main_layout.addLayout(btn_layout)
 
     def update_button_style(self, is_running):
@@ -319,7 +344,6 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "选择 Output 文件夹", self.edit_output.text())
         if path: self.edit_output.setText(path)
 
-    # --- 配置读写 ---
     def load_settings(self):
         defaults = {
             "rgb": os.path.join(os.getcwd(), "RGB"),
@@ -390,8 +414,9 @@ class MainWindow(QMainWindow):
         self.worker.progress_updated.connect(self.on_worker_progress)
         self.worker.finished_success.connect(self.on_worker_success)
         self.worker.finished_error.connect(self.on_worker_error)
+        # 【新增】连接确认请求信号
+        self.worker.request_confirmation.connect(self.on_worker_request_confirmation)
         
-        # 监听 finished 信号以处理“中途取消”的情况
         self.worker.finished.connect(self.on_worker_finished_cleanup)
         
         self.set_ui_running(True)
@@ -400,7 +425,7 @@ class MainWindow(QMainWindow):
     def stop_process(self):
         if self.worker and self.worker.isRunning():
             self.status_label.setText("正在停止...")
-            self.btn_action.setEnabled(False) # 暂时禁用防止连点
+            self.btn_action.setEnabled(False) 
             self.worker.cancel()
 
     def set_ui_running(self, running):
@@ -421,9 +446,20 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(val)
         self.status_label.setText(msg)
 
+    @Slot(str, str)
+    def on_worker_request_confirmation(self, title, msg):
+        """处理来自 Worker 的弹窗请求"""
+        reply = QMessageBox.question(
+            self, title, msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        if self.worker:
+            self.worker._confirm_result = (reply == QMessageBox.StandardButton.Yes)
+            self.worker._confirm_event.set() # 唤醒 Worker
+
     @Slot(str)
     def on_worker_success(self, output_dir):
-        # 【关键修改】成功时，显式标记任务结束
         self.set_ui_running(False)
         QMessageBox.information(self, "完成", "处理完毕")
         if sys.platform == 'win32':
@@ -435,14 +471,14 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_worker_error(self, err_msg):
-        # 【关键修改】报错时，显式标记任务结束
         self.set_ui_running(False)
-        QMessageBox.critical(self, "错误", f"发生错误:\n{err_msg}")
+        if "用户取消" not in err_msg:
+             QMessageBox.critical(self, "错误", f"发生错误:\n{err_msg}")
+        else:
+            self.status_label.setText("已取消")
 
     @Slot()
     def on_worker_finished_cleanup(self):
-        """线程结束后的通用清理"""
-        # 如果 is_running 依然为 True，说明没有经过 success/error，而是被 cancel 或者其他原因退出
         if self.is_running:
             self.set_ui_running(False)
             self.status_label.setText("操作已取消")
