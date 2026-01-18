@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import time
-import threading  # 用于线程同步等待用户确认
 import numpy as np
 import tifffile
 from pathlib import Path
@@ -23,7 +22,7 @@ class ProcessingWorker(QThread):
     progress_updated = Signal(int, str)  # 进度信号 (百分比, 状态文本)
     finished_success = Signal(str)       # 成功信号 (输出目录)
     finished_error = Signal(str)         # 失败信号 (错误信息)
-    request_confirmation = Signal(str, str) # 请求主线程弹窗确认 (标题, 内容)
+    request_confirmation = Signal(str, str) # 请求确认信号 (标题, 内容)
     
     def __init__(self, dir_rgb, input_files, dir_output, dir_contactsheet, use_cache_override=None):
         super().__init__()
@@ -35,12 +34,12 @@ class ProcessingWorker(QThread):
         self._is_cancelled = False
         
         # 线程同步工具
+        import threading
         self._confirm_event = threading.Event()
         self._confirm_result = False
 
     def cancel(self):
         self._is_cancelled = True
-        # 唤醒可能阻塞的确认等待
         self._confirm_result = False
         self._confirm_event.set()
 
@@ -88,7 +87,6 @@ class ProcessingWorker(QThread):
                     file_names.append(f)
                 
                 vecs = np.array(vecs).T 
-                # 矩阵识别核心逻辑：寻找各通道最大值对应的文件索引
                 idx_r = np.argmax(vecs[0, :])
                 idx_g = np.argmax(vecs[1, :])
                 idx_b = np.argmax(vecs[2, :])
@@ -135,7 +133,7 @@ class ProcessingWorker(QThread):
                 prog = int(10 + (i + 1) / total * 80)
                 self.progress_updated.emit(prog, f"正在处理: {fname}")
 
-            # --- Step 3: Contact Sheet (仅当处理图片数 > 1 时生成) ---
+            # --- Step 3: Contact Sheet ---
             if self._is_cancelled: return
             
             if len(generated_files) > 1:
@@ -181,7 +179,6 @@ class ProcessingWorker(QThread):
         for path in image_paths:
             if not os.path.exists(path): continue
             img = tifffile.imread(path)
-            # 降采样 5 倍
             img_small = img[::5, ::5, :]
             imgs.append(img_small)
             h, w = img_small.shape[:2]
@@ -218,7 +215,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("光源-CMOS去串扰工具")
-        self.setFixedSize(800, 420) 
+        self.setFixedSize(800, 420)
         
         self.dir_rgb = ""
         self.input_files_str = "" 
@@ -226,6 +223,7 @@ class MainWindow(QMainWindow):
         self.dir_contactsheet = "" 
         self.worker = None
         self.is_running = False
+        self.last_input_dir = "" # 【新增】用于记忆上次文件选择目录
         
         self._setup_icon()
         self.setup_ui()
@@ -329,14 +327,22 @@ class MainWindow(QMainWindow):
         if path: self.edit_rgb.setText(path)
 
     def browse_input_files(self):
-        current_text = self.edit_input.text()
+        # 优先级：1. 当前输入框里有路径，取其目录 2. 上次保存的目录 (self.last_input_dir) 3. 工作目录
         start_dir = os.getcwd()
+        current_text = self.edit_input.text()
+        
         if current_text:
             first_file = current_text.split(';')[0].strip()
-            if os.path.exists(os.path.dirname(first_file)):
+            if first_file and os.path.exists(os.path.dirname(first_file)):
                 start_dir = os.path.dirname(first_file)
+        elif self.last_input_dir and os.path.exists(self.last_input_dir):
+            start_dir = self.last_input_dir
+
         files, _ = QFileDialog.getOpenFileNames(self, "选择待处理图片 (支持多选)", start_dir, "Images (*.tif *.tiff)")
-        if files: self.edit_input.setText("; ".join(files))
+        if files: 
+            self.edit_input.setText("; ".join(files))
+            # 更新上次目录记忆
+            self.last_input_dir = os.path.dirname(files[0])
 
     def browse_output(self):
         path = QFileDialog.getExistingDirectory(self, "选择 Output 文件夹", self.edit_output.text())
@@ -348,7 +354,12 @@ class MainWindow(QMainWindow):
 
     def load_settings(self):
         cwd = os.getcwd()
-        defaults = {"rgb": os.path.join(cwd, "RGB"), "output": os.path.join(cwd, "output"), "contactsheet": os.path.join(cwd, "output")}
+        defaults = {
+            "rgb": os.path.join(cwd, "RGB"), 
+            "output": os.path.join(cwd, "output"), 
+            "contactsheet": os.path.join(cwd, "output"),
+            "input_dir": "" # 默认空
+        }
         cfg_path = self.get_standard_config_path()
         if os.path.exists(cfg_path):
             try:
@@ -359,17 +370,30 @@ class MainWindow(QMainWindow):
         self.edit_rgb.setText(defaults["rgb"])
         self.edit_output.setText(defaults["output"])
         self.edit_contactsheet.setText(defaults.get("contactsheet", defaults["output"]))
+        self.last_input_dir = defaults.get("input_dir", "") # 加载上次目录
 
     def save_settings(self):
-        input_dir = ""
-        if self.edit_input.text():
-            first_file = self.edit_input.text().split(';')[0].strip()
-            if first_file: input_dir = os.path.dirname(first_file)
-        data = {"rgb": self.edit_rgb.text(), "input_dir": input_dir, "output": self.edit_output.text(), "contactsheet": self.edit_contactsheet.text()}
+        # 尝试从当前输入推断 input_dir，如果没有输入，则保留 self.last_input_dir
+        current_text = self.edit_input.text()
+        input_dir_to_save = self.last_input_dir
+        
+        if current_text:
+            first_file = current_text.split(';')[0].strip()
+            if first_file:
+                input_dir_to_save = os.path.dirname(first_file)
+                self.last_input_dir = input_dir_to_save
+
+        data = {
+            "rgb": self.edit_rgb.text(), 
+            "input_dir": input_dir_to_save, 
+            "output": self.edit_output.text(), 
+            "contactsheet": self.edit_contactsheet.text()
+        }
         try:
             with open(self.get_standard_config_path(), 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
-        except: pass
+        except Exception as e:
+            print(f"保存配置失败: {e}")
 
     def toggle_process(self):
         if not self.is_running: self.start_process()
@@ -408,7 +432,7 @@ class MainWindow(QMainWindow):
         self.worker.progress_updated.connect(self.on_worker_progress)
         self.worker.finished_success.connect(self.on_worker_success)
         self.worker.finished_error.connect(self.on_worker_error)
-        self.worker.request_confirmation.connect(self.on_worker_request_confirmation) # 连接弹窗请求
+        self.worker.request_confirmation.connect(self.on_worker_request_confirmation) 
         self.worker.finished.connect(self.on_worker_finished_cleanup)
         self.set_ui_running(True)
         self.worker.start()
