@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import threading  # 用于线程同步等待用户确认
 import numpy as np
 import tifffile
 from pathlib import Path
@@ -22,18 +23,33 @@ class ProcessingWorker(QThread):
     progress_updated = Signal(int, str)  # 进度信号 (百分比, 状态文本)
     finished_success = Signal(str)       # 成功信号 (输出目录)
     finished_error = Signal(str)         # 失败信号 (错误信息)
+    request_confirmation = Signal(str, str) # 请求主线程弹窗确认 (标题, 内容)
     
     def __init__(self, dir_rgb, input_files, dir_output, dir_contactsheet, use_cache_override=None):
         super().__init__()
         self.dir_rgb = dir_rgb
         self.input_files = input_files # 文件路径列表
         self.dir_output = dir_output
-        self.dir_contactsheet = dir_contactsheet # 【新增】缩略图输出目录
+        self.dir_contactsheet = dir_contactsheet 
         self.use_cache_override = use_cache_override 
         self._is_cancelled = False
+        
+        # 线程同步工具
+        self._confirm_event = threading.Event()
+        self._confirm_result = False
 
     def cancel(self):
         self._is_cancelled = True
+        # 唤醒可能阻塞的确认等待
+        self._confirm_result = False
+        self._confirm_event.set()
+
+    def _wait_for_user_choice(self, title, message):
+        """辅助函数：发送信号给UI并阻塞等待结果"""
+        self._confirm_event.clear()
+        self.request_confirmation.emit(title, message)
+        self._confirm_event.wait()
+        return self._confirm_result
 
     def run(self):
         try:
@@ -44,7 +60,7 @@ class ProcessingWorker(QThread):
             matrix_path = os.path.join(self.dir_rgb, "calibration_matrix.npy")
             M_Final = None
 
-            # 1.1 检查缓存策略 (由主线程传入)
+            # 1.1 检查缓存策略
             if self.use_cache_override is True and os.path.exists(matrix_path):
                 try:
                     M_Final = np.load(matrix_path)
@@ -60,6 +76,7 @@ class ProcessingWorker(QThread):
                     raise ValueError(f"RGB 文件夹必须包含且仅包含 3 张 TIFF 图片，当前找到 {len(files)} 张")
                 
                 vecs = []
+                file_names = []
                 
                 for idx, f in enumerate(files):
                     if self._is_cancelled: return
@@ -68,18 +85,31 @@ class ProcessingWorker(QThread):
                     path = os.path.join(self.dir_rgb, f)
                     vec = self.get_roi_average(path, black_level)
                     vecs.append(vec)
+                    file_names.append(f)
                 
                 vecs = np.array(vecs).T 
+                # 矩阵识别核心逻辑：寻找各通道最大值对应的文件索引
                 idx_r = np.argmax(vecs[0, :])
                 idx_g = np.argmax(vecs[1, :])
                 idx_b = np.argmax(vecs[2, :])
                 
+                # 构造确认信息
+                msg_R = f"【红色 (R)】: {file_names[idx_r]}\n   均值: R={vecs[0, idx_r]:.0f}, G={vecs[1, idx_r]:.0f}, B={vecs[2, idx_r]:.0f}"
+                msg_G = f"【绿色 (G)】: {file_names[idx_g]}\n   均值: R={vecs[0, idx_g]:.0f}, G={vecs[1, idx_g]:.0f}, B={vecs[2, idx_g]:.0f}"
+                msg_B = f"【蓝色 (B)】: {file_names[idx_b]}\n   均值: R={vecs[0, idx_b]:.0f}, G={vecs[1, idx_b]:.0f}, B={vecs[2, idx_b]:.0f}"
+                full_msg = f"自动识别结果如下，请确认：\n\n{msg_R}\n\n{msg_G}\n\n{msg_B}"
+                
+                # 阻塞并请求确认
+                if not self._wait_for_user_choice("确认校正信息", full_msg):
+                    if not self._is_cancelled:
+                        self.finished_error.emit("用户取消处理")
+                    return
+
                 M_obs = np.column_stack((vecs[:, idx_r], vecs[:, idx_g], vecs[:, idx_b]))
                 if np.linalg.cond(M_obs) > 1e15:
                     raise ValueError("观测矩阵奇异，无法计算")
                 
                 M_inv = np.linalg.inv(M_obs)
-                # 行归一化
                 row_sums = M_inv.sum(axis=1, keepdims=True)
                 M_Final = M_inv / row_sums
                 
@@ -91,7 +121,7 @@ class ProcessingWorker(QThread):
             total = len(self.input_files)
             if total == 0: raise ValueError("未选择输入文件")
 
-            generated_files = [] # 记录本次生成的输出文件路径
+            generated_files = [] 
 
             for i, in_path in enumerate(self.input_files):
                 if self._is_cancelled: return
@@ -102,7 +132,6 @@ class ProcessingWorker(QThread):
                 self.process_image(in_path, out_path, M_Final, black_level)
                 generated_files.append(out_path)
                 
-                # 进度 10% -> 90%
                 prog = int(10 + (i + 1) / total * 80)
                 self.progress_updated.emit(prog, f"正在处理: {fname}")
 
@@ -111,7 +140,6 @@ class ProcessingWorker(QThread):
             
             if len(generated_files) > 1:
                 self.progress_updated.emit(90, "步骤 3/4: 生成缩略图总览...")
-                # 【修改】传入独立的 dir_contactsheet 目录
                 self.create_contact_sheet(generated_files, self.dir_contactsheet)
             else:
                 self.progress_updated.emit(90, "步骤 3/4: 单张图片，跳过缩略图...")
@@ -143,24 +171,17 @@ class ProcessingWorker(QThread):
         pixels_corr = pixels @ M.T
         pixels_corr = np.clip(pixels_corr, 0, 65535)
         img_out_arr = pixels_corr.reshape(h, w, c).astype(np.uint16)
-        # 使用 LZW (zlib) 压缩
         tifffile.imwrite(out_path, img_out_arr, compression='zlib')
 
     def create_contact_sheet(self, image_paths, output_dir):
-        """
-        image_paths: 本次处理生成的所有文件列表
-        output_dir: 缩略图保存目录 (contact sheet output dir)
-        """
         if not image_paths: return
-        
         imgs = []
         max_w, max_h = 0, 0
         
         for path in image_paths:
             if not os.path.exists(path): continue
-            
             img = tifffile.imread(path)
-            # 缩小 5 倍
+            # 降采样 5 倍
             img_small = img[::5, ::5, :]
             imgs.append(img_small)
             h, w = img_small.shape[:2]
@@ -168,12 +189,10 @@ class ProcessingWorker(QThread):
             max_h = max(max_h, h)
         
         if not imgs: return
-
         cols = 6
         rows = int(np.ceil(len(imgs) / cols))
         canvas_w = cols * max_w
         canvas_h = rows * max_h
-        
         contact_sheet = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint16)
         
         for idx, img in enumerate(imgs):
@@ -184,13 +203,9 @@ class ProcessingWorker(QThread):
             y = row * max_h
             contact_sheet[y:y+h, x:x+w, :] = img
         
-        # 确保输出目录存在
         if not os.path.exists(output_dir):
-            try:
-                os.makedirs(output_dir)
-            except Exception as e:
-                print(f"无法创建缩略图目录: {e}")
-                return
+            try: os.makedirs(output_dir)
+            except: return
 
         save_path = os.path.join(output_dir, "contactsheet.tiff")
         tifffile.imwrite(save_path, contact_sheet, compression='zlib')
@@ -203,13 +218,12 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("光源-CMOS去串扰工具")
-        self.setFixedSize(800, 420) # 【修改】增加窗口高度以容纳新增的栏目
+        self.setFixedSize(800, 420) 
         
-        # 状态变量
         self.dir_rgb = ""
         self.input_files_str = "" 
         self.dir_output = ""
-        self.dir_contactsheet = "" # 【新增】
+        self.dir_contactsheet = "" 
         self.worker = None
         self.is_running = False
         
@@ -237,10 +251,8 @@ class MainWindow(QMainWindow):
         
         config_dir = os.path.join(base, app_name)
         if not os.path.exists(config_dir):
-            try:
-                os.makedirs(config_dir)
-            except:
-                return os.path.join(os.path.expanduser("~"), ".decouple_tool_config.json")
+            try: os.makedirs(config_dir)
+            except: return os.path.join(os.path.expanduser("~"), ".decouple_tool_config.json")
         return os.path.join(config_dir, "config.json")
 
     def setup_ui(self):
@@ -250,12 +262,10 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(15)
 
-        # 1. 路径设置组
         group_box = QGroupBox("路径设置")
         grid_layout = QGridLayout(group_box)
         grid_layout.setSpacing(10)
         
-        # RGB
         grid_layout.addWidget(QLabel("RGB 校正文件夹:"), 0, 0)
         self.edit_rgb = QLineEdit()
         grid_layout.addWidget(self.edit_rgb, 0, 1)
@@ -263,7 +273,6 @@ class MainWindow(QMainWindow):
         btn_rgb.clicked.connect(self.browse_rgb)
         grid_layout.addWidget(btn_rgb, 0, 2)
 
-        # Input
         grid_layout.addWidget(QLabel("Input 待处理文件:"), 1, 0)
         self.edit_input = QLineEdit()
         self.edit_input.setPlaceholderText("可选择多个文件，路径以分号分隔")
@@ -272,7 +281,6 @@ class MainWindow(QMainWindow):
         btn_input.clicked.connect(self.browse_input_files) 
         grid_layout.addWidget(btn_input, 1, 2)
 
-        # Output
         grid_layout.addWidget(QLabel("Output 输出文件夹:"), 2, 0)
         self.edit_output = QLineEdit()
         grid_layout.addWidget(self.edit_output, 2, 1)
@@ -280,7 +288,6 @@ class MainWindow(QMainWindow):
         btn_output.clicked.connect(self.browse_output)
         grid_layout.addWidget(btn_output, 2, 2)
 
-        # 【新增】Contact Sheet Output
         grid_layout.addWidget(QLabel("缩略图 输出位置:"), 3, 0)
         self.edit_contactsheet = QLineEdit()
         grid_layout.addWidget(self.edit_contactsheet, 3, 1)
@@ -290,26 +297,21 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(group_box)
 
-        # 2. 进度条
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
         main_layout.addWidget(self.progress_bar)
 
-        # 3. 状态标签
         self.status_label = QLabel("就绪")
         main_layout.addWidget(self.status_label)
 
-        # 4. 底部按钮区
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        
         self.btn_action = QPushButton("开始处理")
         self.btn_action.setFixedSize(140, 40)
         self.update_button_style(is_running=False)
         self.btn_action.clicked.connect(self.toggle_process)
-        
         btn_layout.addWidget(self.btn_action)
         btn_layout.addStretch()
         main_layout.addLayout(btn_layout)
@@ -317,26 +319,10 @@ class MainWindow(QMainWindow):
     def update_button_style(self, is_running):
         if is_running:
             self.btn_action.setText("停止")
-            self.btn_action.setStyleSheet("""
-                QPushButton {
-                    font-size: 14px; font-weight: bold;
-                    background-color: #E0E0E0; color: black;
-                    border: 1px solid #C0C0C0; border-radius: 6px;
-                }
-                QPushButton:hover { background-color: #D0D0D0; }
-            """)
+            self.btn_action.setStyleSheet("QPushButton { font-size: 14px; font-weight: bold; background-color: #E0E0E0; color: black; border: 1px solid #C0C0C0; border-radius: 6px; }")
         else:
             self.btn_action.setText("开始处理")
-            self.btn_action.setStyleSheet("""
-                QPushButton {
-                    font-size: 14px; font-weight: bold;
-                    background-color: #007AFF; color: white;
-                    border: none; border-radius: 6px;
-                }
-                QPushButton:hover { background-color: #0069D9; }
-                QPushButton:pressed { background-color: #0051A8; }
-                QPushButton:disabled { background-color: #CCCCCC; }
-            """)
+            self.btn_action.setStyleSheet("QPushButton { font-size: 14px; font-weight: bold; background-color: #007AFF; color: white; border: none; border-radius: 6px; }")
 
     def browse_rgb(self):
         path = QFileDialog.getExistingDirectory(self, "选择 RGB 校正文件夹", self.edit_rgb.text())
@@ -349,34 +335,20 @@ class MainWindow(QMainWindow):
             first_file = current_text.split(';')[0].strip()
             if os.path.exists(os.path.dirname(first_file)):
                 start_dir = os.path.dirname(first_file)
-
-        files, _ = QFileDialog.getOpenFileNames(
-            self, 
-            "选择待处理图片 (支持多选)", 
-            start_dir, 
-            "Images (*.tif *.tiff)"
-        )
-        
-        if files:
-            self.edit_input.setText("; ".join(files))
+        files, _ = QFileDialog.getOpenFileNames(self, "选择待处理图片 (支持多选)", start_dir, "Images (*.tif *.tiff)")
+        if files: self.edit_input.setText("; ".join(files))
 
     def browse_output(self):
         path = QFileDialog.getExistingDirectory(self, "选择 Output 文件夹", self.edit_output.text())
         if path: self.edit_output.setText(path)
 
-    def browse_contactsheet(self): # 【新增】浏览缩略图目录
+    def browse_contactsheet(self):
         path = QFileDialog.getExistingDirectory(self, "选择缩略图输出位置", self.edit_contactsheet.text())
         if path: self.edit_contactsheet.setText(path)
 
     def load_settings(self):
-        # 默认值
         cwd = os.getcwd()
-        defaults = {
-            "rgb": os.path.join(cwd, "RGB"),
-            "input_dir": os.path.join(cwd, "input"), 
-            "output": os.path.join(cwd, "output"),
-            "contactsheet": os.path.join(cwd, "output") # 默认同output
-        }
+        defaults = {"rgb": os.path.join(cwd, "RGB"), "output": os.path.join(cwd, "output"), "contactsheet": os.path.join(cwd, "output")}
         cfg_path = self.get_standard_config_path()
         if os.path.exists(cfg_path):
             try:
@@ -384,96 +356,60 @@ class MainWindow(QMainWindow):
                     data = json.load(f)
                     defaults.update(data)
             except: pass
-        
         self.edit_rgb.setText(defaults["rgb"])
         self.edit_output.setText(defaults["output"])
-        self.edit_contactsheet.setText(defaults.get("contactsheet", defaults["output"])) # 【新增】读取配置
+        self.edit_contactsheet.setText(defaults.get("contactsheet", defaults["output"]))
 
     def save_settings(self):
-        # 尝试获取输入文件的目录作为记忆
         input_dir = ""
-        current_text = self.edit_input.text()
-        if current_text:
-            first_file = current_text.split(';')[0].strip()
-            if first_file:
-                input_dir = os.path.dirname(first_file)
-
-        data = {
-            "rgb": self.edit_rgb.text(),
-            "input_dir": input_dir,
-            "output": self.edit_output.text(),
-            "contactsheet": self.edit_contactsheet.text() # 【新增】保存配置
-        }
-        cfg_path = self.get_standard_config_path()
+        if self.edit_input.text():
+            first_file = self.edit_input.text().split(';')[0].strip()
+            if first_file: input_dir = os.path.dirname(first_file)
+        data = {"rgb": self.edit_rgb.text(), "input_dir": input_dir, "output": self.edit_output.text(), "contactsheet": self.edit_contactsheet.text()}
         try:
-            with open(cfg_path, 'w', encoding='utf-8') as f:
+            with open(self.get_standard_config_path(), 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"保存配置失败: {e}")
+        except: pass
 
-    # --- 核心控制 ---
     def toggle_process(self):
-        if not self.is_running:
-            self.start_process()
-        else:
-            self.stop_process()
+        if not self.is_running: self.start_process()
+        else: self.stop_process()
 
     def start_process(self):
         self.dir_rgb = self.edit_rgb.text()
         self.input_files_str = self.edit_input.text()
         self.dir_output = self.edit_output.text()
-        self.dir_contactsheet = self.edit_contactsheet.text() # 【新增】获取路径
-        
+        self.dir_contactsheet = self.edit_contactsheet.text()
         self.save_settings()
 
-        if not self.dir_rgb or not self.dir_output or not self.dir_contactsheet:
+        if not all([self.dir_rgb, self.dir_output, self.dir_contactsheet]):
             QMessageBox.critical(self, "错误", "路径不能为空")
             return
-        
         if not self.input_files_str:
             QMessageBox.critical(self, "错误", "请选择至少一个输入文件")
             return
-        
-        # 解析文件列表
         input_files = [f.strip() for f in self.input_files_str.split(';') if f.strip()]
-        if not input_files:
-            QMessageBox.critical(self, "错误", "无效的输入文件列表")
-            return
-
+        
         for d in [self.dir_output, self.dir_contactsheet]:
             if not os.path.exists(d):
-                try:
-                    os.makedirs(d)
+                try: os.makedirs(d)
                 except Exception as e:
-                    QMessageBox.critical(self, "错误", f"无法创建目录 {d}:\n{e}")
+                    QMessageBox.critical(self, "错误", f"无法创建目录:\n{e}")
                     return
 
-        # 主线程检查缓存
         matrix_path = os.path.join(self.dir_rgb, "calibration_matrix.npy")
         use_cache = None
         if os.path.exists(matrix_path):
             mod_time = time.ctime(os.path.getmtime(matrix_path))
-            reply = QMessageBox.question(
-                self, "发现缓存", 
-                f"发现已存在的校正文件：\n修改时间: {mod_time}\n\n是否直接使用？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
+            reply = QMessageBox.question(self, "发现缓存", f"发现已存在的校正文件：\n修改时间: {mod_time}\n\n是否直接使用？", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             use_cache = (reply == QMessageBox.StandardButton.Yes)
 
-        # 启动 Worker
-        self.worker = ProcessingWorker(
-            self.dir_rgb, 
-            input_files, 
-            self.dir_output, 
-            self.dir_contactsheet, # 【新增】传入 contactsheet 路径
-            use_cache_override=use_cache
-        )
+        self.worker = ProcessingWorker(self.dir_rgb, input_files, self.dir_output, self.dir_contactsheet, use_cache_override=use_cache)
         self.worker.progress_updated.connect(self.on_worker_progress)
         self.worker.finished_success.connect(self.on_worker_success)
         self.worker.finished_error.connect(self.on_worker_error)
-        
+        self.worker.request_confirmation.connect(self.on_worker_request_confirmation) # 连接弹窗请求
         self.worker.finished.connect(self.on_worker_finished_cleanup)
-        
         self.set_ui_running(True)
         self.worker.start()
 
@@ -489,10 +425,8 @@ class MainWindow(QMainWindow):
         self.edit_rgb.setEnabled(not running)
         self.edit_input.setEnabled(not running)
         self.edit_output.setEnabled(not running)
-        self.edit_contactsheet.setEnabled(not running) # 【新增】禁用
-        
-        if running:
-            self.progress_bar.setValue(0)
+        self.edit_contactsheet.setEnabled(not running)
+        if running: self.progress_bar.setValue(0)
         else:
             self.btn_action.setEnabled(True)
             self.status_label.setText("就绪")
@@ -502,24 +436,26 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(val)
         self.status_label.setText(msg)
 
+    @Slot(str, str)
+    def on_worker_request_confirmation(self, title, msg):
+        reply = QMessageBox.question(self, title, msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if self.worker:
+            self.worker._confirm_result = (reply == QMessageBox.StandardButton.Yes)
+            self.worker._confirm_event.set()
+
     @Slot(str)
     def on_worker_success(self, output_dir):
         self.set_ui_running(False)
         QMessageBox.information(self, "完成", "处理完毕")
-        if sys.platform == 'win32':
-            os.startfile(output_dir)
-        elif sys.platform == 'darwin':
-            os.system(f'open "{output_dir}"')
-        else:
-            os.system(f'xdg-open "{output_dir}"')
+        if sys.platform == 'win32': os.startfile(output_dir)
+        elif sys.platform == 'darwin': os.system(f'open "{output_dir}"')
+        else: os.system(f'xdg-open "{output_dir}"')
 
     @Slot(str)
     def on_worker_error(self, err_msg):
         self.set_ui_running(False)
-        if "用户取消" not in err_msg:
-             QMessageBox.critical(self, "错误", f"发生错误:\n{err_msg}")
-        else:
-            self.status_label.setText("已取消")
+        if "用户取消" not in err_msg: QMessageBox.critical(self, "错误", f"发生错误:\n{err_msg}")
+        else: self.status_label.setText("已取消")
 
     @Slot()
     def on_worker_finished_cleanup(self):
