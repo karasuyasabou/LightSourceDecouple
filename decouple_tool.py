@@ -10,10 +10,25 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QLineEdit, QPushButton, QProgressBar, QFileDialog, 
-    QMessageBox, QGroupBox, QGridLayout, QStyle
+    QMessageBox, QGroupBox, QGridLayout, QStyle, QComboBox
 )
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QSize, QSettings
 from PySide6.QtGui import QIcon, QPixmap, QAction
+
+ICC_PROFILE_FILES = {
+    "ACESCG Linear": "ACESCG Linear.icc",
+    "Kodak2383_Linear": "Kodak2383_Linear.icc",
+    "KodakEnduraPremier_Linear": "KodakEnduraPremier_Linear.icc",
+}
+
+CUSTOM_ICC_OPTION = "custom"
+
+
+def get_app_base_path():
+    if hasattr(sys, '_MEIPASS'):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
 
 # =========================================================================
 # 后台工作线程 (Worker)
@@ -24,14 +39,17 @@ class ProcessingWorker(QThread):
     finished_error = Signal(str)         # 失败信号 (错误信息)
     request_confirmation = Signal(str, str) # 请求确认信号 (标题, 内容)
     
-    def __init__(self, dir_rgb, input_files, dir_output, dir_contactsheet, use_cache_override=None):
+    def __init__(self, dir_rgb, input_files, dir_output, dir_contactsheet, icc_mode="none", custom_icc_path="", use_cache_override=None):
         super().__init__()
         self.dir_rgb = dir_rgb
         self.input_files = input_files # 文件路径列表
         self.dir_output = dir_output
         self.dir_contactsheet = dir_contactsheet 
+        self.icc_mode = icc_mode
+        self.custom_icc_path = custom_icc_path
         self.use_cache_override = use_cache_override 
         self._is_cancelled = False
+        self._selected_icc_bytes = None
         
         # 线程同步工具
         import threading
@@ -169,7 +187,32 @@ class ProcessingWorker(QThread):
         pixels_corr = pixels @ M.T
         pixels_corr = np.clip(pixels_corr, 0, 65535)
         img_out_arr = pixels_corr.reshape(h, w, c).astype(np.uint16)
-        tifffile.imwrite(out_path, img_out_arr, compression='zlib')
+        save_kwargs = {"compression": "zlib"}
+        icc_bytes = self.get_icc_profile_bytes(in_path)
+        if icc_bytes:
+            save_kwargs["extratags"] = [(34675, "B", len(icc_bytes), icc_bytes, False)]
+        tifffile.imwrite(out_path, img_out_arr, **save_kwargs)
+
+    def get_icc_profile_bytes(self, in_path):
+        if self.icc_mode == "none":
+            return None
+
+        if self._selected_icc_bytes is None:
+            if self.icc_mode == CUSTOM_ICC_OPTION:
+                icc_path = self.custom_icc_path
+            else:
+                profile_name = ICC_PROFILE_FILES.get(self.icc_mode)
+                if not profile_name:
+                    raise ValueError(f"未知 ICC 选项: {self.icc_mode}")
+                icc_path = os.path.join(get_app_base_path(), "icc", profile_name)
+
+            if not os.path.exists(icc_path):
+                raise FileNotFoundError(f"找不到 ICC 文件: {icc_path}")
+
+            with open(icc_path, "rb") as f:
+                self._selected_icc_bytes = f.read()
+
+        return self._selected_icc_bytes
 
     def create_contact_sheet(self, image_paths, output_dir):
         if not image_paths: return
@@ -215,7 +258,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("光源-CMOS去串扰工具")
-        self.setFixedSize(800, 420)
+        self.setFixedSize(800, 500)
         
         self.dir_rgb = ""
         self.input_files_str = "" 
@@ -224,16 +267,14 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.is_running = False
         self.last_input_dir = "" # 【新增】用于记忆上次文件选择目录
+        self.last_icc_dir = ""
         
         self._setup_icon()
         self.setup_ui()
         self.load_settings()
 
     def _setup_icon(self):
-        if hasattr(sys, '_MEIPASS'):
-            base_path = sys._MEIPASS
-        else:
-            base_path = os.path.abspath(".")
+        base_path = get_app_base_path()
         icon_path = os.path.join(base_path, "icon.png")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -292,6 +333,25 @@ class MainWindow(QMainWindow):
         btn_contactsheet = QPushButton("浏览...")
         btn_contactsheet.clicked.connect(self.browse_contactsheet)
         grid_layout.addWidget(btn_contactsheet, 3, 2)
+
+        grid_layout.addWidget(QLabel("输出 ICC:"), 4, 0)
+        self.combo_icc = QComboBox()
+        self.combo_icc.addItems([
+            "none",
+            "ACESCG Linear",
+            "Kodak2383_Linear",
+            "KodakEnduraPremier_Linear",
+            CUSTOM_ICC_OPTION,
+        ])
+        self.combo_icc.currentTextChanged.connect(self.on_icc_mode_changed)
+        grid_layout.addWidget(self.combo_icc, 4, 1, 1, 2)
+
+        grid_layout.addWidget(QLabel("自定义 ICC 文件:"), 5, 0)
+        self.edit_custom_icc = QLineEdit()
+        grid_layout.addWidget(self.edit_custom_icc, 5, 1)
+        self.btn_custom_icc = QPushButton("浏览...")
+        self.btn_custom_icc.clicked.connect(self.browse_custom_icc)
+        grid_layout.addWidget(self.btn_custom_icc, 5, 2)
         
         main_layout.addWidget(group_box)
 
@@ -352,13 +412,33 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "选择缩略图输出位置", self.edit_contactsheet.text())
         if path: self.edit_contactsheet.setText(path)
 
+    def browse_custom_icc(self):
+        start_dir = get_app_base_path()
+        current_path = self.edit_custom_icc.text().strip()
+        if current_path and os.path.exists(os.path.dirname(current_path)):
+            start_dir = os.path.dirname(current_path)
+        elif self.last_icc_dir and os.path.exists(self.last_icc_dir):
+            start_dir = self.last_icc_dir
+
+        path, _ = QFileDialog.getOpenFileName(self, "选择 ICC 文件", start_dir, "ICC Profiles (*.icc *.icm)")
+        if path:
+            self.edit_custom_icc.setText(path)
+            self.last_icc_dir = os.path.dirname(path)
+
+    def on_icc_mode_changed(self, mode):
+        is_custom = (mode == CUSTOM_ICC_OPTION)
+        self.edit_custom_icc.setEnabled(is_custom)
+        self.btn_custom_icc.setEnabled(is_custom)
+
     def load_settings(self):
         cwd = os.getcwd()
         defaults = {
             "rgb": os.path.join(cwd, "RGB"), 
             "output": os.path.join(cwd, "output"), 
             "contactsheet": os.path.join(cwd, "output"),
-            "input_dir": "" # 默认空
+            "input_dir": "", # 默认空
+            "icc_profile_mode": "none",
+            "custom_icc_path": "",
         }
         cfg_path = self.get_standard_config_path()
         if os.path.exists(cfg_path):
@@ -371,6 +451,14 @@ class MainWindow(QMainWindow):
         self.edit_output.setText(defaults["output"])
         self.edit_contactsheet.setText(defaults.get("contactsheet", defaults["output"]))
         self.last_input_dir = defaults.get("input_dir", "") # 加载上次目录
+        icc_profile_mode = defaults.get("icc_profile_mode", "none")
+        index = self.combo_icc.findText(icc_profile_mode)
+        self.combo_icc.setCurrentIndex(index if index >= 0 else 0)
+        self.edit_custom_icc.setText(defaults.get("custom_icc_path", ""))
+        custom_icc_path = self.edit_custom_icc.text().strip()
+        if custom_icc_path:
+            self.last_icc_dir = os.path.dirname(custom_icc_path)
+        self.on_icc_mode_changed(self.combo_icc.currentText())
 
     def save_settings(self):
         # 尝试从当前输入推断 input_dir，如果没有输入，则保留 self.last_input_dir
@@ -387,7 +475,9 @@ class MainWindow(QMainWindow):
             "rgb": self.edit_rgb.text(), 
             "input_dir": input_dir_to_save, 
             "output": self.edit_output.text(), 
-            "contactsheet": self.edit_contactsheet.text()
+            "contactsheet": self.edit_contactsheet.text(),
+            "icc_profile_mode": self.combo_icc.currentText(),
+            "custom_icc_path": self.edit_custom_icc.text().strip(),
         }
         try:
             with open(self.get_standard_config_path(), 'w', encoding='utf-8') as f:
@@ -404,6 +494,8 @@ class MainWindow(QMainWindow):
         self.input_files_str = self.edit_input.text()
         self.dir_output = self.edit_output.text()
         self.dir_contactsheet = self.edit_contactsheet.text()
+        icc_mode = self.combo_icc.currentText()
+        custom_icc_path = self.edit_custom_icc.text().strip()
         self.save_settings()
 
         if not all([self.dir_rgb, self.dir_output, self.dir_contactsheet]):
@@ -421,6 +513,19 @@ class MainWindow(QMainWindow):
                     QMessageBox.critical(self, "错误", f"无法创建目录:\n{e}")
                     return
 
+        if icc_mode in ICC_PROFILE_FILES:
+            icc_path = os.path.join(get_app_base_path(), "icc", ICC_PROFILE_FILES[icc_mode])
+            if not os.path.exists(icc_path):
+                QMessageBox.critical(self, "错误", f"找不到 ICC 文件:\n{icc_path}")
+                return
+        elif icc_mode == CUSTOM_ICC_OPTION:
+            if not custom_icc_path:
+                QMessageBox.critical(self, "错误", "请选择自定义 ICC 文件")
+                return
+            if not os.path.exists(custom_icc_path):
+                QMessageBox.critical(self, "错误", f"找不到 ICC 文件:\n{custom_icc_path}")
+                return
+
         matrix_path = os.path.join(self.dir_rgb, "calibration_matrix.npy")
         use_cache = None
         if os.path.exists(matrix_path):
@@ -428,7 +533,15 @@ class MainWindow(QMainWindow):
             reply = QMessageBox.question(self, "发现缓存", f"发现已存在的校正文件：\n修改时间: {mod_time}\n\n是否直接使用？", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             use_cache = (reply == QMessageBox.StandardButton.Yes)
 
-        self.worker = ProcessingWorker(self.dir_rgb, input_files, self.dir_output, self.dir_contactsheet, use_cache_override=use_cache)
+        self.worker = ProcessingWorker(
+            self.dir_rgb,
+            input_files,
+            self.dir_output,
+            self.dir_contactsheet,
+            icc_mode=icc_mode,
+            custom_icc_path=custom_icc_path,
+            use_cache_override=use_cache,
+        )
         self.worker.progress_updated.connect(self.on_worker_progress)
         self.worker.finished_success.connect(self.on_worker_success)
         self.worker.finished_error.connect(self.on_worker_error)
@@ -450,6 +563,9 @@ class MainWindow(QMainWindow):
         self.edit_input.setEnabled(not running)
         self.edit_output.setEnabled(not running)
         self.edit_contactsheet.setEnabled(not running)
+        self.combo_icc.setEnabled(not running)
+        self.edit_custom_icc.setEnabled((not running) and self.combo_icc.currentText() == CUSTOM_ICC_OPTION)
+        self.btn_custom_icc.setEnabled((not running) and self.combo_icc.currentText() == CUSTOM_ICC_OPTION)
         if running: self.progress_bar.setValue(0)
         else:
             self.btn_action.setEnabled(True)
@@ -471,9 +587,6 @@ class MainWindow(QMainWindow):
     def on_worker_success(self, output_dir):
         self.set_ui_running(False)
         QMessageBox.information(self, "完成", "处理完毕")
-        if sys.platform == 'win32': os.startfile(output_dir)
-        elif sys.platform == 'darwin': os.system(f'open "{output_dir}"')
-        else: os.system(f'xdg-open "{output_dir}"')
 
     @Slot(str)
     def on_worker_error(self, err_msg):
