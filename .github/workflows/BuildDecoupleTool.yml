@@ -120,6 +120,7 @@ jobs:
           $ICON_ARG \
           $PYI_ARCH_ARG \
           --add-data "icon.png${{ matrix.sep }}." \
+          --add-data "icc${{ matrix.sep }}icc" \
           --collect-all imagecodecs \
           --collect-all tifffile \
           decouple_tool.py

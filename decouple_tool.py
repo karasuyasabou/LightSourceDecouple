@@ -258,7 +258,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("光源-CMOS去串扰工具")
-        self.setFixedSize(800, 500)
+        self.setFixedSize(800, 460)
         
         self.dir_rgb = ""
         self.input_files_str = "" 
@@ -268,6 +268,8 @@ class MainWindow(QMainWindow):
         self.is_running = False
         self.last_input_dir = "" # 【新增】用于记忆上次文件选择目录
         self.last_icc_dir = ""
+        self.custom_icc_path = ""
+        self.last_noncustom_icc_mode = "none"
         
         self._setup_icon()
         self.setup_ui()
@@ -343,15 +345,8 @@ class MainWindow(QMainWindow):
             "KodakEnduraPremier_Linear",
             CUSTOM_ICC_OPTION,
         ])
-        self.combo_icc.currentTextChanged.connect(self.on_icc_mode_changed)
+        self.combo_icc.activated.connect(self.on_icc_mode_activated)
         grid_layout.addWidget(self.combo_icc, 4, 1, 1, 2)
-
-        grid_layout.addWidget(QLabel("自定义 ICC 文件:"), 5, 0)
-        self.edit_custom_icc = QLineEdit()
-        grid_layout.addWidget(self.edit_custom_icc, 5, 1)
-        self.btn_custom_icc = QPushButton("浏览...")
-        self.btn_custom_icc.clicked.connect(self.browse_custom_icc)
-        grid_layout.addWidget(self.btn_custom_icc, 5, 2)
         
         main_layout.addWidget(group_box)
 
@@ -414,7 +409,7 @@ class MainWindow(QMainWindow):
 
     def browse_custom_icc(self):
         start_dir = get_app_base_path()
-        current_path = self.edit_custom_icc.text().strip()
+        current_path = self.custom_icc_path.strip()
         if current_path and os.path.exists(os.path.dirname(current_path)):
             start_dir = os.path.dirname(current_path)
         elif self.last_icc_dir and os.path.exists(self.last_icc_dir):
@@ -422,13 +417,22 @@ class MainWindow(QMainWindow):
 
         path, _ = QFileDialog.getOpenFileName(self, "选择 ICC 文件", start_dir, "ICC Profiles (*.icc *.icm)")
         if path:
-            self.edit_custom_icc.setText(path)
             self.last_icc_dir = os.path.dirname(path)
+        return path
 
-    def on_icc_mode_changed(self, mode):
-        is_custom = (mode == CUSTOM_ICC_OPTION)
-        self.edit_custom_icc.setEnabled(is_custom)
-        self.btn_custom_icc.setEnabled(is_custom)
+    def on_icc_mode_activated(self, index):
+        mode = self.combo_icc.itemText(index)
+        if mode == CUSTOM_ICC_OPTION:
+            selected_path = self.browse_custom_icc()
+            if selected_path:
+                self.custom_icc_path = selected_path
+            elif not self.custom_icc_path:
+                self.combo_icc.blockSignals(True)
+                self.combo_icc.setCurrentText(self.last_noncustom_icc_mode)
+                self.combo_icc.blockSignals(False)
+                return
+        else:
+            self.last_noncustom_icc_mode = mode
 
     def load_settings(self):
         cwd = os.getcwd()
@@ -454,11 +458,11 @@ class MainWindow(QMainWindow):
         icc_profile_mode = defaults.get("icc_profile_mode", "none")
         index = self.combo_icc.findText(icc_profile_mode)
         self.combo_icc.setCurrentIndex(index if index >= 0 else 0)
-        self.edit_custom_icc.setText(defaults.get("custom_icc_path", ""))
-        custom_icc_path = self.edit_custom_icc.text().strip()
-        if custom_icc_path:
-            self.last_icc_dir = os.path.dirname(custom_icc_path)
-        self.on_icc_mode_changed(self.combo_icc.currentText())
+        self.custom_icc_path = defaults.get("custom_icc_path", "").strip()
+        if self.custom_icc_path:
+            self.last_icc_dir = os.path.dirname(self.custom_icc_path)
+        if self.combo_icc.currentText() != CUSTOM_ICC_OPTION:
+            self.last_noncustom_icc_mode = self.combo_icc.currentText()
 
     def save_settings(self):
         # 尝试从当前输入推断 input_dir，如果没有输入，则保留 self.last_input_dir
@@ -477,7 +481,7 @@ class MainWindow(QMainWindow):
             "output": self.edit_output.text(), 
             "contactsheet": self.edit_contactsheet.text(),
             "icc_profile_mode": self.combo_icc.currentText(),
-            "custom_icc_path": self.edit_custom_icc.text().strip(),
+            "custom_icc_path": self.custom_icc_path,
         }
         try:
             with open(self.get_standard_config_path(), 'w', encoding='utf-8') as f:
@@ -495,7 +499,7 @@ class MainWindow(QMainWindow):
         self.dir_output = self.edit_output.text()
         self.dir_contactsheet = self.edit_contactsheet.text()
         icc_mode = self.combo_icc.currentText()
-        custom_icc_path = self.edit_custom_icc.text().strip()
+        custom_icc_path = self.custom_icc_path.strip()
         self.save_settings()
 
         if not all([self.dir_rgb, self.dir_output, self.dir_contactsheet]):
@@ -564,8 +568,6 @@ class MainWindow(QMainWindow):
         self.edit_output.setEnabled(not running)
         self.edit_contactsheet.setEnabled(not running)
         self.combo_icc.setEnabled(not running)
-        self.edit_custom_icc.setEnabled((not running) and self.combo_icc.currentText() == CUSTOM_ICC_OPTION)
-        self.btn_custom_icc.setEnabled((not running) and self.combo_icc.currentText() == CUSTOM_ICC_OPTION)
         if running: self.progress_bar.setValue(0)
         else:
             self.btn_action.setEnabled(True)
