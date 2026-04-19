@@ -5,6 +5,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build on ${{ matrix.os }} (${{ matrix.arch }})
@@ -143,3 +146,33 @@ jobs:
       with:
         name: ${{ matrix.artifact_name }}
         path: dist/${{ matrix.artifact_name }}
+
+  release:
+    name: Publish v1.2 Release
+    if: github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v1.2'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: release-assets
+
+    - name: Gather release files
+      run: |
+        mkdir -p release-files
+        find release-assets -type f -name '*.zip' -exec cp {} release-files/ \;
+        ls -lh release-files
+
+    - name: Create or update release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v1.2
+        name: v1.2
+        files: |
+          release-files/DecoupleTool-macOS-arm64.zip
+          release-files/DecoupleTool-macOS-x64.zip
+          release-files/DecoupleTool-Windows-x64.zip
+        generate_release_notes: true
