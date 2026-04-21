@@ -148,8 +148,8 @@ jobs:
         path: dist/${{ matrix.artifact_name }}
 
   release:
-    name: Publish v1.2 Release
-    if: github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v1.2'
+    name: Publish v1.3 Release
+    if: github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v1.3'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -169,8 +169,8 @@ jobs:
     - name: Create or update release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: v1.2
-        name: v1.2
+        tag_name: v1.3
+        name: v1.3
         files: |
           release-files/DecoupleTool-macOS-arm64.zip
           release-files/DecoupleTool-macOS-x64.zip
