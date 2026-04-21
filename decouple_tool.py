@@ -214,35 +214,46 @@ class ProcessingWorker(QThread):
 
         return self._selected_icc_bytes
 
+    def _center_crop_image(self, img, target_h, target_w):
+        h, w = img.shape[:2]
+        if h < target_h or w < target_w:
+            raise ValueError("裁切尺寸不能大于原图尺寸")
+
+        top = (h - target_h) // 2
+        left = (w - target_w) // 2
+        return img[top:top + target_h, left:left + target_w, :]
+
     def create_contact_sheet(self, image_paths, output_dir):
         if not image_paths: return
         imgs = []
-        max_w, max_h = 0, 0
-        
+        min_w, min_h = None, None
+
         for path in image_paths:
             if not os.path.exists(path): continue
             img = tifffile.imread(path)
             img_small = img[::5, ::5, :]
             imgs.append(img_small)
             h, w = img_small.shape[:2]
-            max_w = max(max_w, w)
-            max_h = max(max_h, h)
-        
+            min_w = w if min_w is None else min(min_w, w)
+            min_h = h if min_h is None else min(min_h, h)
+
         if not imgs: return
+        if min_w is None or min_h is None: return
+
+        cropped_imgs = [self._center_crop_image(img, min_h, min_w) for img in imgs]
         cols = 6
-        rows = int(np.ceil(len(imgs) / cols))
-        canvas_w = cols * max_w
-        canvas_h = rows * max_h
+        rows = int(np.ceil(len(cropped_imgs) / cols))
+        canvas_w = cols * min_w
+        canvas_h = rows * min_h
         contact_sheet = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint16)
-        
-        for idx, img in enumerate(imgs):
-            h, w = img.shape[:2]
+
+        for idx, img in enumerate(cropped_imgs):
             row = idx // cols
             col = idx % cols
-            x = col * max_w
-            y = row * max_h
-            contact_sheet[y:y+h, x:x+w, :] = img
-        
+            x = col * min_w
+            y = row * min_h
+            contact_sheet[y:y + min_h, x:x + min_w, :] = img
+
         if not os.path.exists(output_dir):
             try: os.makedirs(output_dir)
             except: return
