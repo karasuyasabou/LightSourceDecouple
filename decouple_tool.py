@@ -187,11 +187,14 @@ class ProcessingWorker(QThread):
         pixels_corr = pixels @ M.T
         pixels_corr = np.clip(pixels_corr, 0, 65535)
         img_out_arr = pixels_corr.reshape(h, w, c).astype(np.uint16)
+        tifffile.imwrite(out_path, img_out_arr, **self.get_tiff_save_kwargs(in_path))
+
+    def get_tiff_save_kwargs(self, in_path):
         save_kwargs = {"compression": "zlib"}
         icc_bytes = self.get_icc_profile_bytes(in_path)
         if icc_bytes:
             save_kwargs["extratags"] = [(34675, "B", len(icc_bytes), icc_bytes, False)]
-        tifffile.imwrite(out_path, img_out_arr, **save_kwargs)
+        return save_kwargs
 
     def get_icc_profile_bytes(self, in_path):
         if self.icc_mode == "none":
@@ -259,7 +262,7 @@ class ProcessingWorker(QThread):
             except: return
 
         save_path = os.path.join(output_dir, "contactsheet.tiff")
-        tifffile.imwrite(save_path, contact_sheet, compression='zlib')
+        tifffile.imwrite(save_path, contact_sheet, **self.get_tiff_save_kwargs(image_paths[0]))
 
 
 # =========================================================================
