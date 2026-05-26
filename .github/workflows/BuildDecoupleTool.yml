@@ -50,11 +50,84 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Set up Go 1.25
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25.x'
+
+    - name: Set up MSYS2 toolchain (Windows)
+      if: matrix.platform == 'windows'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        path-type: inherit
+        install: >-
+          git
+          make
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-pkgconf
+
     - name: Set up Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         architecture: ${{ matrix.python_arch }}
+
+    - name: Install vcpkg (macOS)
+      if: matrix.platform == 'macos'
+      run: |
+        git clone https://github.com/microsoft/vcpkg "$GITHUB_WORKSPACE/vcpkg"
+        "$GITHUB_WORKSPACE/vcpkg/bootstrap-vcpkg.sh"
+
+    - name: Install vcpkg (Windows)
+      if: matrix.platform == 'windows'
+      shell: pwsh
+      run: |
+        git clone https://github.com/microsoft/vcpkg "$env:GITHUB_WORKSPACE\vcpkg"
+        & "$env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat"
+
+    - name: Build open-make-tiff CLI (macOS)
+      if: matrix.platform == 'macos'
+      run: |
+        cd third_party/open_make_tiff
+        export VCPKG_ROOT="$GITHUB_WORKSPACE/vcpkg"
+        if [ "${{ matrix.arch }}" = "arm64" ]; then
+          make vcpkg-install-macos-arm64
+          OMT_TRIPLET="arm64-osx-release"
+          export GOARCH="arm64"
+          export CC="clang -arch arm64"
+        else
+          make vcpkg-install-macos-x64
+          OMT_TRIPLET="x64-osx-release"
+          export GOARCH="amd64"
+          export CC="clang -arch x86_64"
+        fi
+        make exiftool-download-macos
+        export PKG_CONFIG_PATH="$VCPKG_ROOT/installed/$OMT_TRIPLET/lib/pkgconfig"
+        export GOOS="darwin"
+        export CGO_ENABLED="1"
+        mkdir -p "$GITHUB_WORKSPACE/build/open_make_tiff" "$GITHUB_WORKSPACE/build/third-party"
+        go build -o "$GITHUB_WORKSPACE/build/open_make_tiff/open-make-tiff" ./cmd/open-make-tiff-cli
+        cp -R third-party/macos-universal/. "$GITHUB_WORKSPACE/build/third-party/"
+        chmod +x "$GITHUB_WORKSPACE/build/open_make_tiff/open-make-tiff"
+
+    - name: Build open-make-tiff CLI (Windows)
+      if: matrix.platform == 'windows'
+      shell: msys2 {0}
+      run: |
+        cd third_party/open_make_tiff
+        export VCPKG_ROOT="$(cygpath -m "$GITHUB_WORKSPACE/vcpkg")"
+        make vcpkg-install-windows
+        powershell -ExecutionPolicy Bypass -File scripts/download-exiftool.ps1 -Version 13.55
+        export PKG_CONFIG_PATH="$(cygpath -m "$GITHUB_WORKSPACE/vcpkg/installed/x64-mingw-static-release/lib/pkgconfig")"
+        export GOOS="windows"
+        export GOARCH="amd64"
+        export CGO_ENABLED="1"
+        export CC="x86_64-w64-mingw32-gcc"
+        mkdir -p "$GITHUB_WORKSPACE/build/open_make_tiff" "$GITHUB_WORKSPACE/build/third-party"
+        go build -o "$GITHUB_WORKSPACE/build/open_make_tiff/open-make-tiff.exe" ./cmd/open-make-tiff-cli
+        cp -R third-party/windows-x64/. "$GITHUB_WORKSPACE/build/third-party/"
 
     - name: Install dependencies
       run: |
@@ -102,6 +175,8 @@ jobs:
       run: |
         ICON_ARG=""
         if [ -f "${{ matrix.icon_file }}" ]; then ICON_ARG="--icon=${{ matrix.icon_file }}"; fi
+        OMT_BINARY="build/open_make_tiff/open-make-tiff"
+        if [ "${{ matrix.platform }}" = "windows" ]; then OMT_BINARY="build/open_make_tiff/open-make-tiff.exe"; fi
         
         PREFIX=""
         if [[ "${{ matrix.platform }}" == "macos" && "${{ matrix.arch }}" == "x64" ]]; then
@@ -124,6 +199,8 @@ jobs:
           $PYI_ARCH_ARG \
           --add-data "icon.png${{ matrix.sep }}." \
           --add-data "icc${{ matrix.sep }}icc" \
+          --add-binary "$OMT_BINARY${{ matrix.sep }}." \
+          --add-data "build/third-party${{ matrix.sep }}third-party" \
           --collect-all imagecodecs \
           --collect-all tifffile \
           decouple_tool.py

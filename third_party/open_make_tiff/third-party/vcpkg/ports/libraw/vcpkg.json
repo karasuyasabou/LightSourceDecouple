@@ -1,0 +1,79 @@
+{
+  "name": "libraw",
+  "version": "0.22.1",
+  "description": "raw image decoder library",
+  "homepage": "https://www.libraw.org",
+  "license": "LGPL-2.1-only OR CDDL-1.0",
+  "supports": "!uwp & !xbox",
+  "dependencies": [
+    {
+      "name": "jasper",
+      "default-features": false
+    },
+    "lcms",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    },
+    "zlib"
+  ],
+  "features": {
+    "dng-lossy": {
+      "description": "DNG lossy codec support",
+      "dependencies": [
+        {
+          "name": "libjpeg-turbo",
+          "features": [
+            "jpeg8"
+          ]
+        }
+      ]
+    },
+    "dngsdk": {
+      "description": "Adobe DNG SDK integration for enhanced DNG support",
+      "dependencies": [
+        {"name": "adobe-dng-sdk"},
+        {
+          "name": "libjpeg-turbo",
+          "features": ["jpeg8"]
+        }
+      ]
+    },
+    "openmp": {
+      "description": "Build library with OpenMP support"
+    },
+    "rawspeed": {
+      "description": "Build library with legacy RawSpeed v1 codec support",
+      "dependencies": [
+        "libxml2",
+        {
+          "name": "libjpeg-turbo",
+          "features": ["jpeg8"]
+        }
+      ]
+    },
+    "rawspeed3": {
+      "description": "Build library with RawSpeed v3 codec support (faster Huffman decoding)",
+      "dependencies": [
+        { "name": "rawspeed3" },
+        { "name": "libjpeg-turbo", "features": ["jpeg8"] }
+      ]
+    },
+    "x3ftools": {
+      "description": "Build library with Foveon X3F support"
+    },
+    "6by9rpi": {
+      "description": "Build library with Raspberry Pi RAW support"
+    },
+    "demosaic-pack-gpl2": {
+      "description": "GPL2 demosaic algorithms (AFD, VCD, LMMSE, Modified AHD). Enabling makes the library GPL-2.0 licensed."
+    },
+    "demosaic-pack-gpl3": {
+      "description": "GPL3 demosaic algorithms (AMaZE). Enabling makes the library GPL-3.0 licensed."
+    }
+  }
+}
