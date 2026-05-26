@@ -11,7 +11,7 @@ from .raw_convert import (
     IMAGE_EXTENSIONS,
     RAW_EXTENSIONS,
     TIFF_EXTENSIONS,
-    convert_raw_to_tiff,
+    convert_raws_to_tiffs,
     is_raw_path,
     output_tiff_name,
 )
@@ -82,16 +82,20 @@ class ProcessingWorker(QThread):
                 if M_Final is None:
                     if self._is_cancelled: return
 
-                    calibration_paths = self.get_calibration_paths()
+                    calibration_source_paths = self.get_calibration_paths()
+                    calibration_paths = self.prepare_readable_images(
+                        calibration_source_paths,
+                        "批量转换校正 RAW",
+                        progress_value=0,
+                    )
                     vecs = []
                     file_names = []
                     
-                    for idx, source_path in enumerate(calibration_paths):
+                    for idx, (source_path, read_path) in enumerate(zip(calibration_source_paths, calibration_paths)):
                         if self._is_cancelled: return
                         display_name = os.path.basename(source_path)
                         self.progress_updated.emit(0, f"正在读取校正图片: {display_name} ...")
-                        path = self.prepare_readable_image(source_path, f"转换校正 RAW: {display_name}")
-                        vec = self.get_roi_average(path, black_level)
+                        vec = self.get_roi_average(read_path, black_level)
                         vecs.append(vec)
                         file_names.append(display_name)
                     
@@ -127,14 +131,18 @@ class ProcessingWorker(QThread):
                 
                 total = len(self.input_files)
                 if total == 0: raise ValueError("未选择输入文件")
+                readable_inputs = self.prepare_readable_images(
+                    self.input_files,
+                    "批量转换输入 RAW",
+                    progress_value=10,
+                )
 
                 generated_files = [] 
 
-                for i, in_path in enumerate(self.input_files):
+                for i, (in_path, read_path) in enumerate(zip(self.input_files, readable_inputs)):
                     if self._is_cancelled: return
                     
                     fname = os.path.basename(in_path)
-                    read_path = self.prepare_readable_image(in_path, f"转换输入 RAW: {fname}")
                     out_path = os.path.join(self.dir_output, output_tiff_name(in_path))
                     
                     self.process_image(read_path, out_path, M_Final, black_level)
@@ -180,14 +188,18 @@ class ProcessingWorker(QThread):
             f"当前找到 TIFF {len(tiff_files)} 张，RAW {len(raw_files)} 张"
         )
 
-    def prepare_readable_image(self, path, status_message):
-        if not is_raw_path(path):
-            return path
+    def prepare_readable_images(self, paths, status_message, progress_value=0):
+        raw_paths = [path for path in paths if is_raw_path(path)]
+        if not raw_paths:
+            return list(paths)
 
-        self.progress_updated.emit(0, status_message)
-        converted = convert_raw_to_tiff(path, is_cancelled=lambda: self._is_cancelled)
-        self._temp_dirs.append(converted.temp_dir)
-        return converted.tiff_path
+        self.progress_updated.emit(progress_value, f"{status_message}: {len(raw_paths)} 张...")
+        converted = convert_raws_to_tiffs(raw_paths, is_cancelled=lambda: self._is_cancelled)
+        for item in converted:
+            if item.temp_dir not in self._temp_dirs:
+                self._temp_dirs.append(item.temp_dir)
+        converted_map = {item.source_path: item.tiff_path for item in converted}
+        return [converted_map.get(path, path) for path in paths]
 
     def get_roi_average(self, path, black_lvl):
         img = tifffile.imread(path)

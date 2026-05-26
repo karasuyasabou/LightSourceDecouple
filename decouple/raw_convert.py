@@ -36,7 +36,8 @@ def is_tiff_path(path):
 
 def output_tiff_name(path):
     if is_raw_path(path):
-        return f"{os.path.basename(path)}.tiff"
+        stem, _ = os.path.splitext(os.path.basename(path))
+        return f"{stem}.tiff"
     return os.path.basename(path)
 
 
@@ -86,24 +87,41 @@ def ensure_adobe_dng_converter_available():
 
 
 def convert_raw_to_tiff(raw_path, is_cancelled=None):
-    if not is_raw_path(raw_path):
-        raise RawConversionError(f"不是支持的 RAW 文件: {raw_path}")
-    if not os.path.exists(raw_path):
-        raise RawConversionError(f"找不到 RAW 文件: {raw_path}")
+    converted = convert_raws_to_tiffs([raw_path], is_cancelled=is_cancelled)
+    return converted[0]
+
+
+def convert_raws_to_tiffs(raw_paths, is_cancelled=None):
+    if not raw_paths:
+        return []
+
+    seen_names = set()
+    for raw_path in raw_paths:
+        if not is_raw_path(raw_path):
+            raise RawConversionError(f"不是支持的 RAW 文件: {raw_path}")
+        if not os.path.exists(raw_path):
+            raise RawConversionError(f"找不到 RAW 文件: {raw_path}")
+        name = os.path.basename(raw_path)
+        if name in seen_names:
+            raise RawConversionError(f"同一批 RAW 中存在重名文件，无法安全转换: {name}")
+        seen_names.add(name)
 
     ensure_adobe_dng_converter_available()
     converter = find_open_make_tiff_executable()
     temp_dir = tempfile.mkdtemp(prefix="decouple_raw_")
-    staged_raw = os.path.join(temp_dir, os.path.basename(raw_path))
-    shutil.copy2(raw_path, staged_raw)
+    staged_paths = []
+    for raw_path in raw_paths:
+        staged_raw = os.path.join(temp_dir, os.path.basename(raw_path))
+        shutil.copy2(raw_path, staged_raw)
+        staged_paths.append(staged_raw)
 
     cmd = [
         converter,
         "-subfolder",
         "-workers",
         str(OPEN_MAKE_TIFF_WORKERS),
-        staged_raw,
     ]
+    cmd.extend(staged_paths)
 
     proc = subprocess.Popen(
         cmd,
@@ -133,23 +151,16 @@ def convert_raw_to_tiff(raw_path, is_cancelled=None):
     if proc.returncode != 0:
         shutil.rmtree(temp_dir, ignore_errors=True)
         detail = f"\n\nopen-make-tiff 输出:\n{output}" if output else ""
-        raise RawConversionError(f"RAW 转 TIFF 失败: {os.path.basename(raw_path)}{detail}")
+        raise RawConversionError(f"RAW 转 TIFF 失败，共 {len(raw_paths)} 张{detail}")
 
-    expected = os.path.join(temp_dir, "make_tiff", f"{os.path.basename(staged_raw)}.tiff")
-    if not os.path.exists(expected):
-        make_tiff_dir = os.path.join(temp_dir, "make_tiff")
-        converted = []
-        if os.path.isdir(make_tiff_dir):
-            converted = [
-                os.path.join(make_tiff_dir, name)
-                for name in os.listdir(make_tiff_dir)
-                if is_tiff_path(name)
-            ]
-        if len(converted) == 1:
-            expected = converted[0]
-        else:
+    make_tiff_dir = os.path.join(temp_dir, "make_tiff")
+    converted = []
+    for raw_path, staged_raw in zip(raw_paths, staged_paths):
+        expected = os.path.join(make_tiff_dir, f"{os.path.basename(staged_raw)}.tiff")
+        if not os.path.exists(expected):
             shutil.rmtree(temp_dir, ignore_errors=True)
             detail = f"\n\nopen-make-tiff 输出:\n{output}" if output else ""
             raise RawConversionError(f"open-make-tiff 完成但没有找到输出 TIFF: {os.path.basename(raw_path)}{detail}")
+        converted.append(ConvertedRaw(source_path=raw_path, tiff_path=expected, temp_dir=temp_dir))
 
-    return ConvertedRaw(source_path=raw_path, tiff_path=expected, temp_dir=temp_dir)
+    return converted
