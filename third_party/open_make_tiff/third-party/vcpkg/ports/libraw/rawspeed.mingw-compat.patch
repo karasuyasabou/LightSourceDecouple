@@ -2,7 +2,7 @@ diff --git a/RawSpeed/Common.h b/RawSpeed/Common.h
 --- a/RawSpeed/Common.h
 +++ b/RawSpeed/Common.h
 @@ -102,7 +102,7 @@ inline int lmax(int p0, int p1) {
-
+ 
  inline uint32 getThreadCount()
  {
 -#ifdef WIN32
@@ -25,5 +25,5 @@ diff --git a/RawSpeed/Common.cpp b/RawSpeed/Common.cpp
 +  GetSystemInfo(&si);
 +  return si.dwNumberOfProcessors;
 +}
-
+ 
  #endif
