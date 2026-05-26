@@ -14,6 +14,10 @@ TIFF_EXTENSIONS = {".tif", ".tiff"}
 IMAGE_EXTENSIONS = TIFF_EXTENSIONS | RAW_EXTENSIONS
 OPEN_MAKE_TIFF_WORKERS = 5
 
+RAW_MODE_AUTO = "auto"       # 自动：有 Adobe DNG Converter 就用，否则 libraw
+RAW_MODE_DNG = "dng"         # 强制使用 Adobe DNG Converter
+RAW_MODE_LIBRAW = "libraw"   # 强制使用 libraw（无需安装）
+
 
 class RawConversionError(RuntimeError):
     pass
@@ -77,21 +81,25 @@ def get_adobe_dng_converter_path():
     return ""
 
 
-def ensure_adobe_dng_converter_available():
+def adobe_dng_converter_available():
     path = get_adobe_dng_converter_path()
-    if not path or not os.path.exists(path):
+    return bool(path) and os.path.exists(path)
+
+
+def ensure_adobe_dng_converter_available():
+    if not adobe_dng_converter_available():
         raise RawConversionError(
             "找不到 Adobe DNG Converter。\n"
-            "为了保持 RAW 转换效果与原 pipeline 一致，请先安装 Adobe DNG Converter 后再处理 RAW 文件。"
+            "请安装 Adobe DNG Converter，或将 RAW 转换模式改为 libraw。"
         )
 
 
-def convert_raw_to_tiff(raw_path, is_cancelled=None):
-    converted = convert_raws_to_tiffs([raw_path], is_cancelled=is_cancelled)
+def convert_raw_to_tiff(raw_path, is_cancelled=None, raw_mode=RAW_MODE_AUTO):
+    converted = convert_raws_to_tiffs([raw_path], is_cancelled=is_cancelled, raw_mode=raw_mode)
     return converted[0]
 
 
-def convert_raws_to_tiffs(raw_paths, is_cancelled=None):
+def convert_raws_to_tiffs(raw_paths, is_cancelled=None, raw_mode=RAW_MODE_AUTO):
     if not raw_paths:
         return []
 
@@ -106,7 +114,14 @@ def convert_raws_to_tiffs(raw_paths, is_cancelled=None):
             raise RawConversionError(f"同一批 RAW 中存在重名文件，无法安全转换: {name}")
         seen_names.add(name)
 
-    ensure_adobe_dng_converter_available()
+    if raw_mode == RAW_MODE_DNG:
+        ensure_adobe_dng_converter_available()
+        use_no_dng = False
+    elif raw_mode == RAW_MODE_LIBRAW:
+        use_no_dng = True
+    else:  # RAW_MODE_AUTO
+        use_no_dng = not adobe_dng_converter_available()
+
     converter = find_open_make_tiff_executable()
     temp_dir = tempfile.mkdtemp(prefix="decouple_raw_")
     staged_paths = []
@@ -121,6 +136,8 @@ def convert_raws_to_tiffs(raw_paths, is_cancelled=None):
         "-workers",
         str(OPEN_MAKE_TIFF_WORKERS),
     ]
+    if use_no_dng:
+        cmd.append("-no-dng")
     cmd.extend(staged_paths)
 
     proc = subprocess.Popen(

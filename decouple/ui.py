@@ -13,8 +13,14 @@ from PySide6.QtGui import QIcon
 
 from .icc import CUSTOM_ICC_OPTION, ICC_PROFILE_FILES
 from .paths import get_app_base_path
-from .raw_convert import image_file_filter
+from .raw_convert import RAW_MODE_AUTO, RAW_MODE_DNG, RAW_MODE_LIBRAW, image_file_filter
 from .worker import ProcessingWorker
+
+RAW_MODE_LABELS = {
+    RAW_MODE_AUTO:   "自动（推荐）",
+    RAW_MODE_DNG:    "Adobe DNG Converter（画质优先）",
+    RAW_MODE_LIBRAW: "libraw（免安装）",
+}
 
 
 # =========================================================================
@@ -24,7 +30,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("光源-CMOS去串扰工具")
-        self.setFixedSize(800, 460)
+        self.setFixedSize(800, 495)
         
         self.dir_rgb = ""
         self.input_files_str = "" 
@@ -113,7 +119,13 @@ class MainWindow(QMainWindow):
         ])
         self.combo_icc.activated.connect(self.on_icc_mode_activated)
         grid_layout.addWidget(self.combo_icc, 4, 1, 1, 2)
-        
+
+        grid_layout.addWidget(QLabel("RAW 转换模式:"), 5, 0)
+        self.combo_raw_mode = QComboBox()
+        for label in RAW_MODE_LABELS.values():
+            self.combo_raw_mode.addItem(label)
+        grid_layout.addWidget(self.combo_raw_mode, 5, 1, 1, 2)
+
         main_layout.addWidget(group_box)
 
         self.progress_bar = QProgressBar()
@@ -203,12 +215,13 @@ class MainWindow(QMainWindow):
     def load_settings(self):
         cwd = os.getcwd()
         defaults = {
-            "rgb": os.path.join(cwd, "RGB"), 
-            "output": os.path.join(cwd, "output"), 
+            "rgb": os.path.join(cwd, "RGB"),
+            "output": os.path.join(cwd, "output"),
             "contactsheet": os.path.join(cwd, "output"),
-            "input_dir": "", # 默认空
+            "input_dir": "",
             "icc_profile_mode": "none",
             "custom_icc_path": "",
+            "raw_mode": RAW_MODE_AUTO,
         }
         cfg_path = self.get_standard_config_path()
         if os.path.exists(cfg_path):
@@ -230,6 +243,11 @@ class MainWindow(QMainWindow):
         if self.combo_icc.currentText() != CUSTOM_ICC_OPTION:
             self.last_noncustom_icc_mode = self.combo_icc.currentText()
 
+        raw_mode = defaults.get("raw_mode", RAW_MODE_AUTO)
+        raw_label = RAW_MODE_LABELS.get(raw_mode, RAW_MODE_LABELS[RAW_MODE_AUTO])
+        idx = self.combo_raw_mode.findText(raw_label)
+        self.combo_raw_mode.setCurrentIndex(idx if idx >= 0 else 0)
+
     def save_settings(self):
         # 尝试从当前输入推断 input_dir，如果没有输入，则保留 self.last_input_dir
         current_text = self.edit_input.text()
@@ -241,13 +259,17 @@ class MainWindow(QMainWindow):
                 input_dir_to_save = os.path.dirname(first_file)
                 self.last_input_dir = input_dir_to_save
 
+        raw_label = self.combo_raw_mode.currentText()
+        raw_mode = next((k for k, v in RAW_MODE_LABELS.items() if v == raw_label), RAW_MODE_AUTO)
+
         data = {
-            "rgb": self.edit_rgb.text(), 
-            "input_dir": input_dir_to_save, 
-            "output": self.edit_output.text(), 
+            "rgb": self.edit_rgb.text(),
+            "input_dir": input_dir_to_save,
+            "output": self.edit_output.text(),
             "contactsheet": self.edit_contactsheet.text(),
             "icc_profile_mode": self.combo_icc.currentText(),
             "custom_icc_path": self.custom_icc_path,
+            "raw_mode": raw_mode,
         }
         try:
             with open(self.get_standard_config_path(), 'w', encoding='utf-8') as f:
@@ -266,6 +288,8 @@ class MainWindow(QMainWindow):
         self.dir_contactsheet = self.edit_contactsheet.text()
         icc_mode = self.combo_icc.currentText()
         custom_icc_path = self.custom_icc_path.strip()
+        raw_label = self.combo_raw_mode.currentText()
+        raw_mode = next((k for k, v in RAW_MODE_LABELS.items() if v == raw_label), RAW_MODE_AUTO)
         self.save_settings()
 
         if not all([self.dir_rgb, self.dir_output, self.dir_contactsheet]):
@@ -311,6 +335,7 @@ class MainWindow(QMainWindow):
             icc_mode=icc_mode,
             custom_icc_path=custom_icc_path,
             use_cache_override=use_cache,
+            raw_mode=raw_mode,
         )
         self.worker.progress_updated.connect(self.on_worker_progress)
         self.worker.finished_success.connect(self.on_worker_success)
@@ -334,6 +359,7 @@ class MainWindow(QMainWindow):
         self.edit_output.setEnabled(not running)
         self.edit_contactsheet.setEnabled(not running)
         self.combo_icc.setEnabled(not running)
+        self.combo_raw_mode.setEnabled(not running)
         if running: self.progress_bar.setValue(0)
         else:
             self.btn_action.setEnabled(True)

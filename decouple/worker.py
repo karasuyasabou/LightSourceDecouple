@@ -10,6 +10,7 @@ from .paths import get_app_base_path
 from .raw_convert import (
     IMAGE_EXTENSIONS,
     RAW_EXTENSIONS,
+    RAW_MODE_AUTO,
     TIFF_EXTENSIONS,
     convert_raws_to_tiffs,
     is_raw_path,
@@ -26,15 +27,16 @@ class ProcessingWorker(QThread):
     finished_error = Signal(str)         # 失败信号 (错误信息)
     request_confirmation = Signal(str, str) # 请求确认信号 (标题, 内容)
     
-    def __init__(self, dir_rgb, input_files, dir_output, dir_contactsheet, icc_mode="none", custom_icc_path="", use_cache_override=None):
+    def __init__(self, dir_rgb, input_files, dir_output, dir_contactsheet, icc_mode="none", custom_icc_path="", use_cache_override=None, raw_mode=RAW_MODE_AUTO):
         super().__init__()
         self.dir_rgb = dir_rgb
         self.input_files = input_files # 文件路径列表
         self.dir_output = dir_output
-        self.dir_contactsheet = dir_contactsheet 
+        self.dir_contactsheet = dir_contactsheet
         self.icc_mode = icc_mode
         self.custom_icc_path = custom_icc_path
-        self.use_cache_override = use_cache_override 
+        self.use_cache_override = use_cache_override
+        self.raw_mode = raw_mode
         self._is_cancelled = False
         self._selected_icc_bytes = None
         self._temp_dirs = []
@@ -194,7 +196,7 @@ class ProcessingWorker(QThread):
             return list(paths)
 
         self.progress_updated.emit(progress_value, f"{status_message}: {len(raw_paths)} 张...")
-        converted = convert_raws_to_tiffs(raw_paths, is_cancelled=lambda: self._is_cancelled)
+        converted = convert_raws_to_tiffs(raw_paths, is_cancelled=lambda: self._is_cancelled, raw_mode=self.raw_mode)
         for item in converted:
             if item.temp_dir not in self._temp_dirs:
                 self._temp_dirs.append(item.temp_dir)
