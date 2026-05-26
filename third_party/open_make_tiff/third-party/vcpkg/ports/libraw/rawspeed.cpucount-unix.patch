@@ -11,5 +11,5 @@ index abec232..6990c04 100644
 +{
 +  return sysconf( _SC_NPROCESSORS_ONLN );
 +}
-
+ 
  #endif
