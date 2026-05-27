@@ -27,7 +27,7 @@ jobs:
             icon_file: icons/app.icns
             sep: ':'
             artifact_name: DecoupleTool-macOS-arm64.zip
-          
+
           # Intel Mac (x64) - Build on macOS 14 via Rosetta (x64 Python)
           - os: macos-14
             platform: macos
@@ -45,6 +45,15 @@ jobs:
             icon_file: icons/app.ico
             sep: ';'
             artifact_name: DecoupleTool-Windows-x64.zip
+
+          # Linux x64
+          - os: ubuntu-22.04
+            platform: linux
+            arch: x64
+            python_arch: x64
+            icon_file: ""
+            sep: ':'
+            artifact_name: DecoupleTool-Linux-x64.zip
 
     steps:
     - name: Checkout code
@@ -74,8 +83,8 @@ jobs:
         python-version: '3.11'
         architecture: ${{ matrix.python_arch }}
 
-    - name: Install vcpkg (macOS)
-      if: matrix.platform == 'macos'
+    - name: Install vcpkg (macOS / Linux)
+      if: matrix.platform == 'macos' || matrix.platform == 'linux'
       run: |
         git clone https://github.com/microsoft/vcpkg "$GITHUB_WORKSPACE/vcpkg"
         "$GITHUB_WORKSPACE/vcpkg/bootstrap-vcpkg.sh"
@@ -86,6 +95,15 @@ jobs:
       run: |
         git clone https://github.com/microsoft/vcpkg "$env:GITHUB_WORKSPACE\vcpkg"
         & "$env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat"
+
+    - name: Install Linux system dependencies
+      if: matrix.platform == 'linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential cmake ninja-build pkg-config nasm \
+          libgl1 libglib2.0-dev curl zip unzip tar \
+          perl
 
     - name: Build open-make-tiff CLI (macOS)
       if: matrix.platform == 'macos'
@@ -128,6 +146,54 @@ jobs:
         mkdir -p "$GITHUB_WORKSPACE/build/open_make_tiff" "$GITHUB_WORKSPACE/build/third-party"
         go build -o "$GITHUB_WORKSPACE/build/open_make_tiff/open-make-tiff.exe" ./cmd/open-make-tiff-cli
         cp -R third-party/windows-x64/. "$GITHUB_WORKSPACE/build/third-party/"
+
+    - name: Build open-make-tiff CLI (Linux)
+      if: matrix.platform == 'linux'
+      run: |
+        cd third_party/open_make_tiff
+        export VCPKG_ROOT="$GITHUB_WORKSPACE/vcpkg"
+        # Exclude dngsdk and dng-lossy: both pull in adobe-dng-sdk which has
+        # no Linux support. libraw's built-in DNG decoder covers all common
+        # RAW formats; EnableDNGSDK() failure is handled gracefully in runner.go.
+        $VCPKG_ROOT/vcpkg install \
+          "libraw[6by9rpi,demosaic-pack-gpl2,demosaic-pack-gpl3,rawspeed,rawspeed3,x3ftools]" \
+          "tiff[cxx,jpeg,lerc,libdeflate,lzma,webp,zip,zstd]" \
+          --overlay-ports=third-party/vcpkg/ports \
+          --overlay-triplets=third-party/vcpkg/triplets \
+          --triplet=x64-linux-release \
+          --recurse
+
+        # Inject rawspeed3 libs directly into libraw_r.pc after -lraw_r.
+        # portfile.cmake's string-replace injection into the Requires field may
+        # silently fail if the generated .pc file uses a different spacing format.
+        # Modifying Libs directly here guarantees correct static-link order
+        # (-lraw_r before -lrawspeed3) and works regardless of binary caching.
+        LIBRAW_R_PC="$VCPKG_ROOT/installed/x64-linux-release/lib/pkgconfig/libraw_r.pc"
+        if [ -f "$LIBRAW_R_PC" ] && ! grep -q lrawspeed3 "$LIBRAW_R_PC"; then
+            sed -i 's/-lraw_r/-lraw_r -lrawspeed3 -lrawspeed -lpugixml/g' "$LIBRAW_R_PC"
+        fi
+
+        # Download ExifTool (Perl script, works on Linux with system Perl)
+        EXIFTOOL_VERSION="13.55"
+        mkdir -p third-party/linux-x64
+        curl -L -o /tmp/exiftool-linux.tar.gz \
+          "https://sourceforge.net/projects/exiftool/files/Image-ExifTool-${EXIFTOOL_VERSION}.tar.gz/download"
+        tar xzf /tmp/exiftool-linux.tar.gz -C /tmp
+        cp /tmp/Image-ExifTool-${EXIFTOOL_VERSION}/exiftool third-party/linux-x64/exiftool
+        cp -r /tmp/Image-ExifTool-${EXIFTOOL_VERSION}/lib third-party/linux-x64/lib
+        chmod +x third-party/linux-x64/exiftool
+        rm -rf /tmp/Image-ExifTool-${EXIFTOOL_VERSION} /tmp/exiftool-linux.tar.gz
+
+        export PKG_CONFIG_PATH="$VCPKG_ROOT/installed/x64-linux-release/lib/pkgconfig"
+        export GOOS="linux"
+        export GOARCH="amd64"
+        export CGO_ENABLED="1"
+        # libraw is C++; static link requires the C++ stdlib and math lib
+        export CGO_LDFLAGS="-lstdc++ -lm"
+        mkdir -p "$GITHUB_WORKSPACE/build/open_make_tiff" "$GITHUB_WORKSPACE/build/third-party"
+        go build -o "$GITHUB_WORKSPACE/build/open_make_tiff/open-make-tiff" ./cmd/open-make-tiff-cli
+        cp -R third-party/linux-x64/. "$GITHUB_WORKSPACE/build/third-party/"
+        chmod +x "$GITHUB_WORKSPACE/build/open_make_tiff/open-make-tiff"
 
     - name: Install dependencies
       run: |
@@ -177,7 +243,7 @@ jobs:
         if [ -f "${{ matrix.icon_file }}" ]; then ICON_ARG="--icon=${{ matrix.icon_file }}"; fi
         OMT_BINARY="build/open_make_tiff/open-make-tiff"
         if [ "${{ matrix.platform }}" = "windows" ]; then OMT_BINARY="build/open_make_tiff/open-make-tiff.exe"; fi
-        
+
         PREFIX=""
         if [[ "${{ matrix.platform }}" == "macos" && "${{ matrix.arch }}" == "x64" ]]; then
           PREFIX="arch -x86_64"
@@ -192,7 +258,8 @@ jobs:
            fi
         fi
 
-        # Using --onedir for faster startup
+        # --windowed / --noconsole suppresses the terminal on macOS/Windows;
+        # on Linux the flag is harmless but we keep parity with other platforms.
         $PREFIX python -m PyInstaller --clean --noconfirm --windowed --noconsole --onedir \
           --name "DecoupleTool" \
           $ICON_ARG \
@@ -218,11 +285,58 @@ jobs:
         cd dist
         powershell Compress-Archive -Path DecoupleTool -DestinationPath ${{ matrix.artifact_name }}
 
+    - name: Package Linux App
+      if: matrix.platform == 'linux'
+      run: |
+        # zip
+        cd dist && zip -r DecoupleTool-Linux-x64.zip DecoupleTool && cd ..
+
+        # AppImage
+        wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" \
+          -O /tmp/appimagetool
+        chmod +x /tmp/appimagetool
+
+        # Build AppDir: copy PyInstaller onedir output, then add AppImage metadata
+        mkdir -p AppDir
+        cp -r dist/DecoupleTool/. AppDir/
+
+        cat > AppDir/DecoupleTool.desktop << 'DESKTOP'
+        [Desktop Entry]
+        Name=DecoupleTool
+        Exec=DecoupleTool
+        Icon=DecoupleTool
+        Type=Application
+        Categories=Graphics;Photography;
+        DESKTOP
+
+        cp icon.png AppDir/DecoupleTool.png
+
+        cat > AppDir/AppRun << 'APPRUN'
+        #!/bin/bash
+        HERE=$(dirname "$(readlink -f "$0")")
+        exec "$HERE/DecoupleTool" "$@"
+        APPRUN
+        chmod +x AppDir/AppRun
+
+        # --appimage-extract-and-run avoids FUSE requirement on CI runners
+        ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run \
+          AppDir dist/DecoupleTool-Linux-x64.AppImage
+
     - name: Upload Artifact
+      if: matrix.platform != 'linux'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.artifact_name }}
         path: dist/${{ matrix.artifact_name }}
+
+    - name: Upload Linux Artifacts
+      if: matrix.platform == 'linux'
+      uses: actions/upload-artifact@v4
+      with:
+        name: DecoupleTool-Linux-x64
+        path: |
+          dist/DecoupleTool-Linux-x64.zip
+          dist/DecoupleTool-Linux-x64.AppImage
 
   release:
     name: Publish v1.5 Release
@@ -240,7 +354,8 @@ jobs:
     - name: Gather release files
       run: |
         mkdir -p release-files
-        find release-assets -type f -name '*.zip' -exec cp {} release-files/ \;
+        find release-assets -type f \( -name '*.zip' -o -name '*.AppImage' \) \
+          -exec cp {} release-files/ \;
         ls -lh release-files
 
     - name: Create or update release
@@ -252,4 +367,6 @@ jobs:
           release-files/DecoupleTool-macOS-arm64.zip
           release-files/DecoupleTool-macOS-x64.zip
           release-files/DecoupleTool-Windows-x64.zip
+          release-files/DecoupleTool-Linux-x64.zip
+          release-files/DecoupleTool-Linux-x64.AppImage
         generate_release_notes: true

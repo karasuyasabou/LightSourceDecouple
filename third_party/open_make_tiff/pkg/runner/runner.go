@@ -450,7 +450,9 @@ func (r *Runner) decodeDirect(ctx context.Context, env ConvertEnv) (*decodedImag
 	defer close(cancelDone)
 
 	if err := rp.EnableDNGSDK(); err != nil {
-		return nil, fmt.Errorf("decodeDirect: enable DNG SDK: %w", err)
+		// DNG SDK may not be compiled in (e.g. Linux builds); fall back to
+		// libraw's built-in DNG decoder which handles all common formats.
+		r.logger.Warn("DNG SDK not available, using built-in decoder", "err", err)
 	}
 
 	if err := rp.OpenFile(env.SrcPath); err != nil {

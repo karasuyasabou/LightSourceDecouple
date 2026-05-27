@@ -14,7 +14,7 @@ func GetExiftoolExecutable() (string, error) {
 	switch runtime.GOOS {
 	case "windows":
 		return filepath.Join(filepath.Dir(self), "third-party", "exiftool.exe"), nil
-	case "darwin":
+	case "darwin", "linux":
 		return filepath.Join(filepath.Dir(self), "third-party", "exiftool"), nil
 	}
 	return "", nil
