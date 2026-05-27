@@ -23,10 +23,16 @@ from .raw_convert import RAW_MODE_AUTO, RAW_MODE_DNG, RAW_MODE_LIBRAW, image_fil
 from .worker import ProcessingWorker
 
 RAW_MODE_LABELS = {
-    RAW_MODE_AUTO:   "自动（推荐）",
-    RAW_MODE_DNG:    "Adobe DNG Converter（画质优先）",
+    RAW_MODE_AUTO:   "自动",
+    RAW_MODE_DNG:    "Adobe DNG Converter（推荐）",
     RAW_MODE_LIBRAW: "libraw（免安装）",
 }
+
+DEFAULT_RAW_MODE = RAW_MODE_AUTO
+
+
+def raw_mode_from_label(label):
+    return next((k for k, v in RAW_MODE_LABELS.items() if v == label), DEFAULT_RAW_MODE)
 
 
 class FileCard(QFrame):
@@ -580,6 +586,8 @@ class MainWindow(QMainWindow):
 
     def start_calibration(self, files):
         matrix_path = get_calibration_matrix_path()
+        raw_label = self.combo_raw_mode.currentText()
+        raw_mode = raw_mode_from_label(raw_label)
         self.worker = ProcessingWorker(
             files,
             [],
@@ -589,6 +597,7 @@ class MainWindow(QMainWindow):
             matrix_path=matrix_path,
             calibration_only=True,
             confirm_calibration=False,
+            raw_mode=raw_mode,
         )
         self.worker.progress_updated.connect(self.on_worker_progress)
         self.worker.finished_success.connect(self.on_calibration_success)
@@ -660,7 +669,7 @@ class MainWindow(QMainWindow):
             "last_rgb_dir": os.path.join(cwd, "RGB"),
             "icc_profile_mode": "none",
             "custom_icc_path": "",
-            "raw_mode": RAW_MODE_AUTO,
+            "raw_mode": DEFAULT_RAW_MODE,
         }
         cfg_path = self.get_standard_config_path()
         if os.path.exists(cfg_path):
@@ -683,8 +692,8 @@ class MainWindow(QMainWindow):
         if self.combo_icc.currentText() != CUSTOM_ICC_OPTION:
             self.last_noncustom_icc_mode = self.combo_icc.currentText()
 
-        raw_mode = defaults.get("raw_mode", RAW_MODE_AUTO)
-        raw_label = RAW_MODE_LABELS.get(raw_mode, RAW_MODE_LABELS[RAW_MODE_AUTO])
+        raw_mode = defaults.get("raw_mode", DEFAULT_RAW_MODE)
+        raw_label = RAW_MODE_LABELS.get(raw_mode, RAW_MODE_LABELS[DEFAULT_RAW_MODE])
         idx = self.combo_raw_mode.findText(raw_label)
         self.combo_raw_mode.setCurrentIndex(idx if idx >= 0 else 0)
 
@@ -696,7 +705,7 @@ class MainWindow(QMainWindow):
             self.last_input_dir = input_dir_to_save
 
         raw_label = self.combo_raw_mode.currentText()
-        raw_mode = next((k for k, v in RAW_MODE_LABELS.items() if v == raw_label), RAW_MODE_AUTO)
+        raw_mode = raw_mode_from_label(raw_label)
 
         data = {
             "rgb_files": self.rgb_files,
@@ -725,7 +734,7 @@ class MainWindow(QMainWindow):
         icc_mode = self.combo_icc.currentText()
         custom_icc_path = self.custom_icc_path.strip()
         raw_label = self.combo_raw_mode.currentText()
-        raw_mode = next((k for k, v in RAW_MODE_LABELS.items() if v == raw_label), RAW_MODE_AUTO)
+        raw_mode = raw_mode_from_label(raw_label)
         self.save_settings()
 
         if not all([self.dir_output, self.dir_contactsheet]):
