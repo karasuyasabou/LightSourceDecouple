@@ -163,6 +163,16 @@ jobs:
           --triplet=x64-linux-release \
           --recurse
 
+        # Inject rawspeed3 libs directly into libraw_r.pc after -lraw_r.
+        # portfile.cmake's string-replace injection into the Requires field may
+        # silently fail if the generated .pc file uses a different spacing format.
+        # Modifying Libs directly here guarantees correct static-link order
+        # (-lraw_r before -lrawspeed3) and works regardless of binary caching.
+        LIBRAW_R_PC="$VCPKG_ROOT/installed/x64-linux-release/lib/pkgconfig/libraw_r.pc"
+        if [ -f "$LIBRAW_R_PC" ] && ! grep -q lrawspeed3 "$LIBRAW_R_PC"; then
+            sed -i 's/-lraw_r/-lraw_r -lrawspeed3 -lrawspeed -lpugixml/g' "$LIBRAW_R_PC"
+        fi
+
         # Download ExifTool (Perl script, works on Linux with system Perl)
         EXIFTOOL_VERSION="13.55"
         mkdir -p third-party/linux-x64
