@@ -5,10 +5,10 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QLineEdit, QPushButton, QProgressBar, QFileDialog, 
     QMessageBox, QGroupBox, QGridLayout, QComboBox, QFrame,
-    QScrollArea, QToolButton, QSizePolicy, QCheckBox
+    QScrollArea, QToolButton, QSizePolicy, QCheckBox, QApplication
 )
-from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt, Signal, Slot, QEvent
+from PySide6.QtGui import QIcon, QColor, QPalette
 
 from .calibration import (
     format_cache_created_date,
@@ -273,9 +273,12 @@ class MainWindow(QMainWindow):
         self.custom_icc_path = ""
         self.last_noncustom_icc_mode = "none"
         self.calibration_dialog = None
+        self._theme_applying = False
+        self._applied_theme_key = None
         
         self._setup_icon()
         self.setup_ui()
+        self._bind_theme_changes()
         self.load_settings()
 
     def _setup_icon(self):
@@ -381,149 +384,287 @@ class MainWindow(QMainWindow):
         btn_layout.addStretch()
         self.btn_action = QPushButton("开始处理")
         self.btn_action.setFixedSize(140, 40)
-        self.update_button_style(is_running=False)
         self.btn_action.clicked.connect(self.toggle_process)
         btn_layout.addWidget(self.btn_action)
         btn_layout.addStretch()
         main_layout.addLayout(btn_layout)
-        self.setStyleSheet("""
-            QWidget#mainWindow {
-                background: #1F1F1F;
+        self._apply_theme()
+
+    def update_button_style(self, is_running):
+        colors = self._theme_colors()
+        if is_running:
+            self.btn_action.setText("停止")
+            self.btn_action.setStyleSheet(
+                "QPushButton { "
+                "font-size: 14px; "
+                "font-weight: bold; "
+                f"background-color: {colors['stop_bg']}; "
+                f"color: {colors['stop_text']}; "
+                f"border: 1px solid {colors['stop_border']}; "
+                "border-radius: 6px; "
+                "}"
+            )
+        else:
+            self.btn_action.setText("开始处理")
+            self.btn_action.setStyleSheet("QPushButton { font-size: 14px; font-weight: bold; background-color: #007AFF; color: white; border: none; border-radius: 6px; }")
+
+    def _bind_theme_changes(self):
+        app = QApplication.instance()
+        if not app:
+            return
+        try:
+            app.styleHints().colorSchemeChanged.connect(lambda _scheme: self._apply_theme())
+        except (AttributeError, TypeError):
+            pass
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ThemeChange,
+        ):
+            self._apply_theme()
+
+    def _is_dark_theme(self):
+        app = QApplication.instance()
+        if not app:
+            return True
+        return app.styleHints().colorScheme() == Qt.ColorScheme.Dark
+
+    def _theme_colors(self):
+        if self._is_dark_theme():
+            return {
+                "window": "#1F1F1F",
+                "panel": "#2A2A2A",
+                "panel_border": "#3D3D3D",
+                "text": "#E8E8E8",
+                "field_bg": "#383838",
+                "field_text": "#F2F2F2",
+                "field_disabled": "#333333",
+                "disabled_text": "#8A8A8A",
+                "button_bg": "#3C3C3C",
+                "button_hover": "#464646",
+                "button_pressed": "#505050",
+                "button_disabled": "#333333",
+                "button_disabled_text": "#777777",
+                "progress_bg": "#333333",
+                "drop_bg": "#333333",
+                "card_bg": "#2C2C2C",
+                "card_border": "#4A4A4A",
+                "file_text": "#F0F0F0",
+                "placeholder": "#9A9A9A",
+                "remove_bg": "#3A3A3A",
+                "remove_hover": "#484848",
+                "remove_border": "#565656",
+                "stop_bg": "#E0E0E0",
+                "stop_text": "#000000",
+                "stop_border": "#C0C0C0",
+                "accent": "#0A84FF",
             }
-            QGroupBox {
-                background: #2A2A2A;
-                border: 1px solid #3D3D3D;
+        return {
+            "window": "#F5F5F7",
+            "panel": "#FFFFFF",
+            "panel_border": "#D7D7DC",
+            "text": "#1D1D1F",
+            "field_bg": "#ECECF0",
+            "field_text": "#1D1D1F",
+            "field_disabled": "#F0F0F2",
+            "disabled_text": "#8E8E93",
+            "button_bg": "#E9E9ED",
+            "button_hover": "#DEDEE4",
+            "button_pressed": "#D2D2D8",
+            "button_disabled": "#F0F0F2",
+            "button_disabled_text": "#A1A1A6",
+            "progress_bg": "#E1E1E6",
+            "drop_bg": "#F0F0F3",
+            "card_bg": "#FFFFFF",
+            "card_border": "#D7D7DC",
+            "file_text": "#1D1D1F",
+            "placeholder": "#6E6E73",
+            "remove_bg": "#F5F5F7",
+            "remove_hover": "#E9E9ED",
+            "remove_border": "#C6C6CC",
+            "stop_bg": "#F4F4F6",
+            "stop_text": "#1D1D1F",
+            "stop_border": "#C6C6CC",
+            "accent": "#007AFF",
+        }
+
+    def _apply_theme(self):
+        theme_key = "dark" if self._is_dark_theme() else "light"
+        if self._theme_applying or self._applied_theme_key == theme_key:
+            return
+
+        colors = self._theme_colors()
+        self._theme_applying = True
+        self._applied_theme_key = theme_key
+        try:
+            self._apply_palette(colors)
+            self.setStyleSheet(self._theme_stylesheet(colors))
+            if hasattr(self, "btn_action"):
+                self.update_button_style(self.is_running)
+        finally:
+            self._theme_applying = False
+
+    def _apply_palette(self, colors):
+        app = QApplication.instance()
+        if not app:
+            return
+        palette = app.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(colors["window"]))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(colors["text"]))
+        palette.setColor(QPalette.ColorRole.Base, QColor(colors["field_bg"]))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(colors["panel"]))
+        palette.setColor(QPalette.ColorRole.Text, QColor(colors["field_text"]))
+        palette.setColor(QPalette.ColorRole.Button, QColor(colors["button_bg"]))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor(colors["text"]))
+        palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(colors["panel"]))
+        palette.setColor(QPalette.ColorRole.ToolTipText, QColor(colors["text"]))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(colors["accent"]))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(colors["placeholder"]))
+        app.setPalette(palette)
+
+    def _theme_stylesheet(self, colors):
+        return f"""
+            QMainWindow, QWidget#mainWindow {{
+                background: {colors['window']};
+            }}
+            QGroupBox {{
+                background: {colors['panel']};
+                border: 1px solid {colors['panel_border']};
                 border-radius: 12px;
-                color: #E8E8E8;
+                color: {colors['text']};
                 font-weight: 600;
                 margin-top: 0px;
-            }
-            QGroupBox::title {
+            }}
+            QGroupBox::title {{
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
                 left: 12px;
                 padding: 0 6px;
-                background: #1F1F1F;
-            }
-            QLabel {
-                color: #E8E8E8;
+                background: {colors['window']};
+            }}
+            QLabel {{
+                color: {colors['text']};
                 font-size: 13px;
-            }
-            QLineEdit, QComboBox {
-                background: #383838;
+            }}
+            QLineEdit, QComboBox {{
+                background: {colors['field_bg']};
                 border: none;
                 border-radius: 8px;
-                color: #F2F2F2;
+                color: {colors['field_text']};
                 min-height: 28px;
                 padding: 0 10px;
-            }
-            QComboBox {
+            }}
+            QComboBox {{
                 padding-right: 30px;
-            }
-            QComboBox::drop-down {
+            }}
+            QComboBox::drop-down {{
                 background: transparent;
                 border: none;
                 width: 28px;
-            }
-            QComboBox::down-arrow {
+            }}
+            QComboBox::down-arrow {{
                 image: none;
                 border: none;
-            }
-            QLineEdit:disabled, QComboBox:disabled {
-                background: #333333;
-                color: #8A8A8A;
-            }
-            QPushButton {
-                background: #3C3C3C;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {colors['panel']};
+                border: 1px solid {colors['panel_border']};
+                color: {colors['field_text']};
+                selection-background-color: {colors['accent']};
+                selection-color: white;
+                outline: none;
+            }}
+            QLineEdit:disabled, QComboBox:disabled {{
+                background: {colors['field_disabled']};
+                color: {colors['disabled_text']};
+            }}
+            QPushButton {{
+                background: {colors['button_bg']};
                 border: none;
                 border-radius: 8px;
-                color: #F2F2F2;
+                color: {colors['field_text']};
                 min-height: 30px;
                 padding: 0 12px;
-            }
-            QPushButton:hover {
-                background: #464646;
-            }
-            QPushButton:pressed {
-                background: #505050;
-            }
-            QPushButton:disabled {
-                background: #333333;
-                color: #777777;
-            }
-            QPushButton#rgbButton {
+            }}
+            QPushButton:hover {{
+                background: {colors['button_hover']};
+            }}
+            QPushButton:pressed {{
+                background: {colors['button_pressed']};
+            }}
+            QPushButton:disabled {{
+                background: {colors['button_disabled']};
+                color: {colors['button_disabled_text']};
+            }}
+            QPushButton#rgbButton {{
                 min-height: 24px;
                 max-height: 24px;
                 border-radius: 7px;
                 padding: 0 10px;
                 font-size: 12px;
-            }
-            QCheckBox {
-                color: #E8E8E8;
+            }}
+            QCheckBox {{
+                color: {colors['text']};
                 spacing: 6px;
-            }
-            QProgressBar {
-                background: #333333;
+            }}
+            QProgressBar {{
+                background: {colors['progress_bg']};
                 border: none;
                 border-radius: 5px;
                 color: transparent;
-            }
-            QProgressBar::chunk {
-                background: #0A84FF;
+            }}
+            QProgressBar::chunk {{
+                background: {colors['accent']};
                 border-radius: 5px;
-            }
-            QFrame#fileDropArea {
-                background: #333333;
+            }}
+            QFrame#fileDropArea {{
+                background: {colors['drop_bg']};
                 border: none;
                 border-radius: 10px;
-            }
-            QScrollArea#fileScrollArea {
+            }}
+            QScrollArea#fileScrollArea {{
                 background: transparent;
                 border: none;
-            }
-            QWidget#fileDropContent {
+            }}
+            QWidget#fileDropContent {{
                 background: transparent;
-            }
-            QFrame#fileCard {
+            }}
+            QFrame#fileCard {{
                 background: transparent;
                 border: none;
-            }
-            QFrame#fileCardBody {
-                background: #2C2C2C;
-                border: 1px solid #4A4A4A;
+            }}
+            QFrame#fileCardBody {{
+                background: {colors['card_bg']};
+                border: 1px solid {colors['card_border']};
                 border-radius: 8px;
-            }
-            QLabel#fileName {
-                color: #F0F0F0;
+            }}
+            QLabel#fileName {{
+                color: {colors['file_text']};
                 font-size: 11px;
                 font-weight: 600;
                 padding: 0px;
-            }
-            QLabel#dropPlaceholder {
-                color: #9A9A9A;
+            }}
+            QLabel#dropPlaceholder {{
+                color: {colors['placeholder']};
                 font-size: 13px;
-            }
-            QToolButton#removeButton {
-                background: #3A3A3A;
-                color: #E8E8E8;
-                border: 1px solid #565656;
+            }}
+            QToolButton#removeButton {{
+                background: {colors['remove_bg']};
+                color: {colors['text']};
+                border: 1px solid {colors['remove_border']};
                 border-radius: 5px;
                 font-size: 8px;
                 font-weight: bold;
                 padding: 0px;
-            }
-            QToolButton#removeButton:hover {
-                background: #484848;
-            }
-        """)
-
-    def update_button_style(self, is_running):
-        if is_running:
-            self.btn_action.setText("停止")
-            self.btn_action.setStyleSheet("QPushButton { font-size: 14px; font-weight: bold; background-color: #E0E0E0; color: black; border: 1px solid #C0C0C0; border-radius: 6px; }")
-        else:
-            self.btn_action.setText("开始处理")
-            self.btn_action.setStyleSheet("QPushButton { font-size: 14px; font-weight: bold; background-color: #007AFF; color: white; border: none; border-radius: 6px; }")
+            }}
+            QToolButton#removeButton:hover {{
+                background: {colors['remove_hover']};
+            }}
+        """
 
     def browse_rgb(self):
         start_dir = self.last_rgb_dir if self.last_rgb_dir and os.path.exists(self.last_rgb_dir) else os.getcwd()

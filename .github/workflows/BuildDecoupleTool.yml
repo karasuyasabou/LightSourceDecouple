@@ -339,8 +339,8 @@ jobs:
           dist/DecoupleTool-Linux-x64.AppImage
 
   release:
-    name: Publish v1.6 Release
-    if: github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v1.6'
+    name: Publish v1.7 Release
+    if: github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v1.7'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -361,8 +361,8 @@ jobs:
     - name: Create or update release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: v1.6
-        name: v1.6
+        tag_name: v1.7
+        name: v1.7
         files: |
           release-files/DecoupleTool-macOS-arm64.zip
           release-files/DecoupleTool-macOS-x64.zip
